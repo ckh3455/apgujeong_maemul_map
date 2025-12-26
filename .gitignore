@@ -1,2 +1,5 @@
 .streamlit/secrets.toml
 *.json
+echo .streamlit/secrets.toml>> .gitignore
+echo .gemini/>> .gitignore
+
