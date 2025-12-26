@@ -15,7 +15,7 @@ from google.oauth2.service_account import Credentials
 
 # ====== 로컬 개발용(배포에서는 Secrets 사용 권장) ======
 SERVICE_ACCOUNT_FILE = r"D:\OneDrive\office work\naver crawling\naver-crawling-476404-fcf4b10bc63e 클라우드 서비스계정.txt"
-SPREADSHEET_ID = "1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE"
+SPREADSHEET_ID_DEFAULT = "1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE"
 
 TAB_LISTING = "매매물건 목록"
 TAB_LOC = "압구정 위치정보"
@@ -144,27 +144,110 @@ def pick_first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str |
     return None
 
 
+def extract_spreadsheet_id(url_or_id: str) -> str:
+    """스프레드시트 URL 또는 ID에서 ID만 추출"""
+    if not url_or_id:
+        return ""
+    s = str(url_or_id).strip()
+    # 이미 ID만 들어온 경우
+    if "docs.google.com" not in s and "/" not in s and len(s) >= 20:
+        return s
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", s)
+    if m:
+        return m.group(1)
+    # 마지막 fallback: 편집 URL에 gid만 붙었을 때
+    s = s.split("#", 1)[0]
+    return s
+
+
+def get_spreadsheet_id() -> str:
+    """
+    우선순위:
+    1) st.secrets["SPREADSHEET_ID"]
+    2) st.secrets["connections"]["gsheets"]["spreadsheet"] (URL 또는 ID)
+    3) 환경변수 SPREADSHEET_ID
+    4) 코드 기본값
+    """
+    if "SPREADSHEET_ID" in st.secrets:
+        return extract_spreadsheet_id(st.secrets["SPREADSHEET_ID"])
+
+    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+        gs = st.secrets["connections"]["gsheets"]
+        if "spreadsheet" in gs:
+            sid = extract_spreadsheet_id(gs["spreadsheet"])
+            if sid:
+                return sid
+
+    env = os.getenv("SPREADSHEET_ID")
+    if env:
+        return extract_spreadsheet_id(env)
+
+    return SPREADSHEET_ID_DEFAULT
+
+
 def get_service_account_info():
     """
     우선순위:
-    1) Streamlit secrets: st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
-    2) 환경변수: GCP_SERVICE_ACCOUNT_JSON
-    3) 로컬 파일(개발용): SERVICE_ACCOUNT_FILE
-    """
-    if "GCP_SERVICE_ACCOUNT_JSON" in st.secrets:
-        return json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+    1) Streamlit secrets: GCP_SERVICE_ACCOUNT_JSON (서비스계정 JSON 전체 문자열 또는 dict)
+    2) Streamlit secrets: [connections.gsheets] (service_account 필드가 테이블로 들어있는 형태)
+    3) 환경변수: GCP_SERVICE_ACCOUNT_JSON
+    4) 로컬 개발용 파일: SERVICE_ACCOUNT_FILE (존재할 때만)
 
+    Cloud에서 secrets가 없는데 로컬 파일 경로로 떨어져서 FileNotFoundError 나는 것을 막기 위해,
+    로컬 파일도 없으면 RuntimeError로 명확히 안내합니다.
+    """
+    # 1) JSON 통째로
+    if "GCP_SERVICE_ACCOUNT_JSON" in st.secrets:
+        v = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
+        if isinstance(v, dict):
+            return v
+        return json.loads(str(v))
+
+    # 2) connections.gsheets 테이블(예전 TOML 구조)
+    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+        gs = st.secrets["connections"]["gsheets"]
+
+        # gs 자체가 service account 필드들을 포함한다고 가정
+        keys = [
+            "type", "project_id", "private_key_id", "private_key",
+            "client_email", "client_id",
+            "auth_uri", "token_uri",
+            "auth_provider_x509_cert_url", "client_x509_cert_url",
+        ]
+        sa = {k: gs[k] for k in keys if k in gs}
+
+        required = ["type", "project_id", "private_key", "client_email", "token_uri"]
+        if all(k in sa and str(sa[k]).strip() for k in required):
+            return sa
+
+        # connections.gsheets가 있지만 필드가 부족한 경우
+        raise RuntimeError(
+            "Streamlit Secrets의 [connections.gsheets]에 서비스계정 필수 항목이 부족합니다. "
+            "type/project_id/private_key/client_email/token_uri를 확인하세요."
+        )
+
+    # 3) ENV
     env = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
     if env:
         return json.loads(env)
 
-    # 로컬 fallback
-    return json.loads(Path(SERVICE_ACCOUNT_FILE).read_text(encoding="utf-8").strip())
+    # 4) 로컬 파일 fallback
+    p = Path(SERVICE_ACCOUNT_FILE)
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8").strip())
+
+    # 여기까지면 Cloud에서 secrets 미설정 상태
+    raise RuntimeError(
+        "서비스계정 Secrets가 설정되지 않았습니다. "
+        "Streamlit Cloud > Manage app > Settings > Secrets에 "
+        "GCP_SERVICE_ACCOUNT_JSON 또는 [connections.gsheets]를 등록하세요."
+    )
 
 
 @st.cache_data(ttl=600)
 def load_data():
     sa = get_service_account_info()
+    spreadsheet_id = get_spreadsheet_id()
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -173,7 +256,7 @@ def load_data():
     creds = Credentials.from_service_account_info(sa, scopes=scopes)
     gc = gspread.authorize(creds)
 
-    sh = gc.open_by_key(SPREADSHEET_ID)
+    sh = gc.open_by_key(spreadsheet_id)
 
     ws_list = sh.worksheet(TAB_LISTING)
     ws_loc = sh.worksheet(TAB_LOC)
@@ -277,6 +360,7 @@ def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_v
     preferred = [col_date, col_area, col_complex, col_size]
     if "가격(억)" in t.columns:
         preferred.append("가격(억)")
+
     for extra in ["동", "호", "비고"]:
         if extra in t.columns and extra not in preferred:
             preferred.append(extra)
@@ -592,7 +676,6 @@ with col_right:
         selection_mode="single-row",
     )
 
-    # 행 선택 시 지도 이동 + 동 선택 변경 (디바운스 포함)
     try:
         if event and event.selection and event.selection.rows:
             ridx = event.selection.rows[0]
@@ -611,8 +694,7 @@ with col_right:
                     "경도": float(row["경도"]),
                 }
                 st.session_state["last_table_sel_sig"] = sel_sig
-                st.session_state["last_click_sig"] = ""  # 다음 지도 클릭 정상 인식
+                st.session_state["last_click_sig"] = ""
                 st.rerun()
     except Exception:
-        # Streamlit 버전/환경에 따라 selection 이벤트 구조가 다를 수 있어 안전 처리
         pass
