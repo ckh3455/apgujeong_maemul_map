@@ -1,0 +1,55 @@
+name: build
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create Streamlit secrets.toml from GitHub Secret
+        env:
+          GCP_SA_KEY_JSON: ${{ secrets.GCP_SA_KEY_JSON }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+
+          sa = json.loads(os.environ["GCP_SA_KEY_JSON"])
+          sheet_id = "1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE"
+
+          pathlib.Path(".streamlit").mkdir(parents=True, exist_ok=True)
+
+          toml = f"""[connections.gsheets]
+          spreadsheet = "{sheet_id}"
+
+          type = "{sa['type']}"
+          project_id = "{sa['project_id']}"
+          private_key_id = "{sa['private_key_id']}"
+          private_key = "{sa['private_key']}"
+          client_email = "{sa['client_email']}"
+          client_id = "{sa['client_id']}"
+          auth_uri = "{sa['auth_uri']}"
+          token_uri = "{sa['token_uri']}"
+          auth_provider_x509_cert_url = "{sa['auth_provider_x509_cert_url']}"
+          client_x509_cert_url = "{sa['client_x509_cert_url']}"
+          """
+          pathlib.Path(".streamlit/secrets.toml").write_text(toml, encoding="utf-8")
+          print("wrote .streamlit/secrets.toml")
+          PY
+
+      - name: Basic check
+        run: |
+          python -c "import streamlit; print('streamlit ok')"
