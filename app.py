@@ -407,7 +407,6 @@ div[data-testid="stDataFrame"] div[role="grid"] {
     unsafe_allow_html=True,
 )
 
-# (사이드바 제거) 필터를 본문 상단에 배치
 st.subheader("필터")
 only_active = st.checkbox("상태=활성만 표시", value=True)
 
@@ -620,28 +619,26 @@ with col_right:
 
     df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] == dong)].copy()
 
-    # ===== 요청 반영 =====
-    # 1) 컬럼 순서: '요약내용' 앞에 '부동산' 오도록
-    # 2) 폭 조정: '구역','동'은 더 좁게 / '평형','층/호','가격'도 좁게(요약내용 공간 확보)
-    show_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "요약내용", "상태"]
+    # ===== 요청 반영 (정확 적용) =====
+    # - '평형대','구역' 제거
+    # - '부동산'을 '요약내용' 앞에 배치
+    show_cols = ["단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "요약내용", "상태"]
     show_cols = [c for c in show_cols if c in df_pick.columns]
     view_pick = df_pick[show_cols].reset_index(drop=True)
 
-    # column_config는 Streamlit 버전에 따라 미지원일 수 있어 안전 처리
+    # 폭: 요약내용을 최대(large), 다른 컬럼은 최대한 small로 눌러 체감상 3배 확보
     col_cfg = None
     try:
         col_cfg = {
-            "구역": st.column_config.TextColumn("구역", width="small"),
-            "동": st.column_config.TextColumn("동", width="small"),
+            "단지명": st.column_config.TextColumn("단지명", width="small"),
             "평형": st.column_config.TextColumn("평형", width="small"),
+            "대지지분": st.column_config.TextColumn("대지지분", width="small"),
+            "동": st.column_config.TextColumn("동", width="small"),
             "층/호": st.column_config.TextColumn("층/호", width="small"),
             "가격": st.column_config.NumberColumn("가격", width="small"),
+            "부동산": st.column_config.TextColumn("부동산", width="small"),
             "요약내용": st.column_config.TextColumn("요약내용", width="large"),
-            "단지명": st.column_config.TextColumn("단지명", width="medium"),
-            "대지지분": st.column_config.TextColumn("대지지분", width="medium"),
-            "부동산": st.column_config.TextColumn("부동산", width="medium"),
             "상태": st.column_config.TextColumn("상태", width="small"),
-            "평형대": st.column_config.TextColumn("평형대", width="small"),
         }
         col_cfg = {k: v for k, v in col_cfg.items() if k in view_pick.columns}
     except Exception:
@@ -660,7 +657,7 @@ with col_right:
             use_container_width=True,
             height=dataframe_height(view_pick, max_height=650),
         )
-    # =====================
+    # ================================
 
     st.divider()
     st.subheader("선택 구역 평형별 요약 (활성 매물)")
