@@ -391,27 +391,27 @@ def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
 st.set_page_config(layout="wide")
 st.title("압구정 매물 지도 MVP (상태=활성, 수동 갱신)")
 
-with st.sidebar:
-    st.subheader("필터")
-    only_active = st.checkbox("상태=활성만 표시", value=True)
+# (사이드바 제거) 필터/갱신 UI를 본문 상단에 배치
+st.subheader("필터")
+only_active = st.checkbox("상태=활성만 표시", value=True)
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("데이터 새로고침"):
-            load_data.clear()
-            st.rerun()
-    with col_b:
-        if st.button("캐시만 비우기"):
-            load_data.clear()
-            st.success("캐시를 비웠습니다. (다음 실행 때 새로 로드)")
+col_a, col_b = st.columns(2)
+with col_a:
+    if st.button("데이터 새로고침"):
+        load_data.clear()
+        st.rerun()
+with col_b:
+    if st.button("캐시만 비우기"):
+        load_data.clear()
+        st.success("캐시를 비웠습니다. (다음 실행 때 새로 로드)")
 
-    st.caption("지도는 클릭 이벤트만 수신(드래그/줌 시 자동 새로고침 없음).")
+st.caption("지도는 클릭 이벤트만 수신(드래그/줌 시 자동 새로고침 없음).")
 
 
 # ====== Load ======
 df_list, df_loc, df_trade, client_email = load_data()
 if client_email:
-    st.sidebar.caption(f"서비스계정: {client_email}")
+    st.caption(f"서비스계정: {client_email}")
 
 # 층/호 보정
 if "층/호" not in df_list.columns and "층수" in df_list.columns:
@@ -544,7 +544,8 @@ for _, r in gdf.iterrows():
         tooltip=tooltip,
     ).add_to(m)
 
-col_map, col_right = st.columns([1.1, 1])
+# (지도 영역 확장) 좌측(지도) 컬럼 비율을 키움
+col_map, col_right = st.columns([1.7, 1])
 
 with col_map:
     st.subheader("지도")
@@ -587,7 +588,8 @@ with col_right:
 
     df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] == dong)].copy()
 
-    show_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "상태", "위도", "경도"]
+    # (위도/경도 제거)
+    show_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "상태"]
     show_cols = [c for c in show_cols if c in df_pick.columns]
     st.dataframe(df_pick[show_cols], use_container_width=True)
 
@@ -659,8 +661,8 @@ with col_right:
 
     dfq = dfq.sort_values("가격_num", ascending=True).reset_index(drop=True)
 
-    # 표 컬럼 순서: 구역, 평형대, 단지명, 동, 층/호, 가격, 부동산
-    display_cols = ["구역", "평형대", "단지명", "동", "층/호", "가격(억)표시", "부동산"]
+    # 표 컬럼 순서: 구역, 평형대, 단지명, 동, 층/호, 가격, 요약내용, 부동산
+    display_cols = ["구역", "평형대", "단지명", "동", "층/호", "가격(억)표시", "요약내용", "부동산"]
     display_cols = [c for c in display_cols if c in dfq.columns]
 
     df_show = dfq[display_cols + ["위도", "경도", "동_key", "가격_num"]].copy()
