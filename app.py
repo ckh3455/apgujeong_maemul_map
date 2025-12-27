@@ -118,7 +118,7 @@ def st_df(obj, **kwargs):
     """
     Streamlit 버전에 따라 hide_index 지원 여부가 달라서 안전하게 처리.
     - 지원하면 hide_index=True 적용
-    - 미지원이면 기존 동작 유지
+    - 미지원이면 기존 동작 유지 (인덱스는 CSS로 숨김)
     """
     try:
         return st.dataframe(obj, hide_index=True, **kwargs)
@@ -168,25 +168,16 @@ def extract_spreadsheet_id(url_or_id: str) -> str:
     if not url_or_id:
         return ""
     s = str(url_or_id).strip()
-    # 이미 ID만 들어온 경우
     if "docs.google.com" not in s and "/" not in s and len(s) >= 20:
         return s
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", s)
     if m:
         return m.group(1)
-    # 마지막 fallback: 편집 URL에 gid만 붙었을 때
     s = s.split("#", 1)[0]
     return s
 
 
 def get_spreadsheet_id() -> str:
-    """
-    우선순위:
-    1) st.secrets["SPREADSHEET_ID"]
-    2) st.secrets["connections"]["gsheets"]["spreadsheet"] (URL 또는 ID)
-    3) 환경변수 SPREADSHEET_ID
-    4) 코드 기본값
-    """
     if "SPREADSHEET_ID" in st.secrets:
         return extract_spreadsheet_id(st.secrets["SPREADSHEET_ID"])
 
@@ -205,63 +196,37 @@ def get_spreadsheet_id() -> str:
 
 
 def get_service_account_info():
-    """
-    우선순위:
-    1) Streamlit secrets: GCP_SERVICE_ACCOUNT_JSON (서비스계정 JSON 전체 문자열 또는 dict)
-    2) Streamlit secrets: [connections.gsheets] (service_account 필드가 테이블로 들어있는 형태)
-    3) 환경변수: GCP_SERVICE_ACCOUNT_JSON
-    4) 로컬 개발용 파일: SERVICE_ACCOUNT_FILE (존재할 때만)
-
-    Cloud에서 secrets가 없는데 로컬 파일 경로로 떨어져서 FileNotFoundError 나는 것을 막기 위해,
-    로컬 파일도 없으면 RuntimeError로 명확히 안내합니다.
-    """
-    # 1) JSON 통째로
     if "GCP_SERVICE_ACCOUNT_JSON" in st.secrets:
         v = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
         if isinstance(v, dict):
             return v
         return json.loads(str(v))
 
-    # 2) connections.gsheets 테이블(예전 TOML 구조)
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
         gs = st.secrets["connections"]["gsheets"]
-
-        # gs 자체가 service account 필드들을 포함한다고 가정
         keys = [
-            "type",
-            "project_id",
-            "private_key_id",
-            "private_key",
-            "client_email",
-            "client_id",
-            "auth_uri",
-            "token_uri",
-            "auth_provider_x509_cert_url",
-            "client_x509_cert_url",
+            "type", "project_id", "private_key_id", "private_key",
+            "client_email", "client_id",
+            "auth_uri", "token_uri",
+            "auth_provider_x509_cert_url", "client_x509_cert_url",
         ]
         sa = {k: gs[k] for k in keys if k in gs}
-
         required = ["type", "project_id", "private_key", "client_email", "token_uri"]
         if all(k in sa and str(sa[k]).strip() for k in required):
             return sa
-
-        # connections.gsheets가 있지만 필드가 부족한 경우
         raise RuntimeError(
             "Streamlit Secrets의 [connections.gsheets]에 서비스계정 필수 항목이 부족합니다. "
             "type/project_id/private_key/client_email/token_uri를 확인하세요."
         )
 
-    # 3) ENV
     env = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
     if env:
         return json.loads(env)
 
-    # 4) 로컬 파일 fallback
     p = Path(SERVICE_ACCOUNT_FILE)
     if p.exists():
         return json.loads(p.read_text(encoding="utf-8").strip())
 
-    # 여기까지면 Cloud에서 secrets 미설정 상태
     raise RuntimeError(
         "서비스계정 Secrets가 설정되지 않았습니다. "
         "Streamlit Cloud > Manage app > Settings > Secrets에 "
@@ -416,6 +381,32 @@ def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
 st.set_page_config(layout="wide")
 st.title("압구정 매물 지도 MVP (상태=활성, 수동 갱신)")
 
+# 행번호(인덱스) 영역 강제 숨김 (Streamlit 버전 차이 대응)
+st.markdown(
+    """
+<style>
+/* st.dataframe / st.data_editor 공통: row header(행번호) 숨김 */
+div[data-testid="stDataFrame"] div[role="rowheader"],
+div[data-testid="stDataFrame"] div[role="rowheader"] * {
+    display: none !important;
+    visibility: hidden !important;
+    width: 0 !important;
+    min-width: 0 !important;
+}
+/* 좌상단 빈 코너(인덱스 헤더) 숨김 */
+div[data-testid="stDataFrame"] .blank,
+div[data-testid="stDataFrame"] .row_heading {
+    display: none !important;
+}
+/* 일부 버전에서 남는 여백 최소화 */
+div[data-testid="stDataFrame"] div[role="grid"] {
+    padding-left: 0 !important;
+}
+</style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.subheader("필터")
 only_active = st.checkbox("상태=활성만 표시", value=True)
 
@@ -441,14 +432,31 @@ if "층/호" not in df_list.columns and "층수" in df_list.columns:
     df_list = df_list.copy()
     df_list["층/호"] = df_list["층수"]
 
-# 요약내용 컬럼 보정: 표 표시용으로 '요약내용'을 항상 보장
+# --- 요약내용 컬럼명 표준화/보장 (시트에 '요약내용'이 있는데 앱에서 못 잡는 문제 방지) ---
+df_list = df_list.copy()
+rename_map = {}
+for c in df_list.columns:
+    c0 = str(c)
+    c_norm = re.sub(r"\s+", "", c0)  # 공백 제거
+    # '요약내용' 또는 유사 형태를 강제로 '요약내용'으로 통일
+    if c_norm == "요약내용" or ("요약" in c_norm and "내용" in c_norm):
+        rename_map[c] = "요약내용"
+    elif c_norm in ["요약", "요약내용요", "설명", "비고", "메모"] and "요약내용" not in df_list.columns:
+        # (선택) 시트가 요약내용 대신 다른 이름만 쓰는 경우 대비
+        # 단, 실제로 '요약내용' 컬럼이 이미 있으면 덮어쓰지 않음
+        rename_map[c] = c0  # 그대로 두고 아래에서 복사할 source 후보로 사용
+
+if rename_map:
+    df_list.rename(columns=rename_map, inplace=True)
+
+# 요약내용 컬럼 보장: 없으면 후보에서 복사해서 생성
 summary_src = pick_first_existing_column(df_list, ["요약내용", "요약 내용", "요약", "설명", "비고", "메모"])
 if "요약내용" not in df_list.columns:
     df_list["요약내용"] = df_list[summary_src] if summary_src else ""
 elif summary_src and summary_src != "요약내용":
-    # 이미 '요약내용'이 있지만 다른 요약 컬럼이 따로 있으면, 빈 값만 보완
     left = df_list["요약내용"].astype(str).str.strip()
     df_list.loc[left.eq(""), "요약내용"] = df_list.loc[left.eq(""), summary_src]
+# -------------------------------------------------------------------------------
 
 need_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "상태"]
 missing = [c for c in need_cols if c not in df_list.columns]
@@ -457,7 +465,6 @@ if missing:
     st.stop()
 
 # 좌표 컬럼 확보
-df_list = df_list.copy()
 for c in ["위도", "경도"]:
     if c not in df_list.columns:
         df_list[c] = None
@@ -508,22 +515,13 @@ gdf = build_grouped(df_view)
 
 # 구역별 색상
 palette = [
-    "#1f77b4",
-    "#ff7f0e",
-    "#2ca02c",
-    "#d62728",
-    "#9467bd",
-    "#8c564b",
-    "#e377c2",
-    "#7f7f7f",
-    "#bcbd22",
-    "#17becf",
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
 ]
 areas = sorted([a for a in gdf["구역"].dropna().astype(str).unique()])
 area_color = {a: palette[i % len(palette)] for i, a in enumerate(areas)}
 default_color = "#333333"
 
-# 지도 기본 줌
 DEFAULT_ZOOM = 16
 
 # 상태 변수
@@ -538,11 +536,10 @@ if "last_click_sig" not in st.session_state:
 if "last_table_sel_sig" not in st.session_state:
     st.session_state["last_table_sel_sig"] = ""
 
-# 우측 하단 필터 상태
 if "quick_filter_mode" not in st.session_state:
-    st.session_state["quick_filter_mode"] = "size"  # "size" or "price"
+    st.session_state["quick_filter_mode"] = "size"
 if "quick_filter_bucket" not in st.session_state:
-    st.session_state["quick_filter_bucket"] = 30  # 기본 30평대
+    st.session_state["quick_filter_bucket"] = 30
 
 
 # ====== 지도 생성 ======
@@ -552,7 +549,6 @@ m = folium.Map(
     tiles="CartoDB positron",
 )
 
-# 클릭 매칭용 목록
 marker_rows = []
 for _, r in gdf.iterrows():
     marker_rows.append(
@@ -563,13 +559,11 @@ for _, r in gdf.iterrows():
         )
     )
 
-# 마커: 투명 히트박스 + 라벨
 for _, r in gdf.iterrows():
     area_raw = str(r["구역"]) if pd.notna(r["구역"]) else ""
     bg = area_color.get(area_raw, default_color)
     dong_label = str(r["동_key"])
     area_display = f"{norm_area(area_raw)}구역" if norm_area(area_raw) else ""
-
     tooltip = f"{area_display} | {r['단지명']} {dong_label}동 | 활성 {int(r['활성건수'])}건"
 
     folium.CircleMarker(
@@ -588,7 +582,6 @@ for _, r in gdf.iterrows():
         tooltip=tooltip,
     ).add_to(m)
 
-# 지도 영역 확장 (좌측 컬럼 비율 확대)
 col_map, col_right = st.columns([1.7, 1])
 
 with col_map:
@@ -601,7 +594,6 @@ with col_map:
         key="map",
     )
 
-# 마커 클릭 처리(한 번 클릭으로 확정)
 if out:
     clicked = out.get("last_object_clicked", None)
     if clicked:
@@ -632,10 +624,11 @@ with col_right:
 
     df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] == dong)].copy()
 
+    # 위도/경도 제거 + 요약내용 포함(표시 보장)
     show_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "요약내용", "부동산", "상태"]
     show_cols = [c for c in show_cols if c in df_pick.columns]
 
-    view_pick = df_pick[show_cols]
+    view_pick = df_pick[show_cols].reset_index(drop=True)
     st_df(
         view_pick,
         use_container_width=True,
@@ -651,7 +644,7 @@ with col_right:
         if summary.empty:
             st.info("해당 구역에서 요약할 데이터가 없습니다.")
         else:
-            summary_view = summary[["평형", "매물건수", "가격대(최저~최고)", "최저가격", "최고가격"]]
+            summary_view = summary[["평형", "매물건수", "가격대(최저~최고)", "최저가격", "최고가격"]].reset_index(drop=True)
             st_df(
                 summary_view,
                 use_container_width=True,
@@ -677,19 +670,19 @@ with col_right:
         if trades.empty:
             st.info("일치하는 거래내역이 없습니다.")
         else:
-            styled = trades.style.set_properties(**{"color": "red"})
+            trades2 = trades.reset_index(drop=True)
+            styled = trades2.style.set_properties(**{"color": "red"})
             try:
-                styled = styled.hide(axis="index")  # pandas Styler 지원 시 행번호 숨김
+                styled = styled.hide(axis="index")
             except Exception:
                 pass
 
             st.dataframe(
                 styled,
                 use_container_width=True,
-                height=dataframe_height(trades, max_height=240),
+                height=dataframe_height(trades2, max_height=240),
             )
 
-    # ====== 우측 하단: 빠른 필터/정렬 ======
     st.divider()
     st.subheader("빠른 필터 (활성 매물)")
 
@@ -722,11 +715,10 @@ with col_right:
 
     dfq = dfq.sort_values("가격_num", ascending=True).reset_index(drop=True)
 
-    # 표 컬럼 순서: 구역, 평형대, 단지명, 동, 층/호, 가격, 요약내용, 부동산
     display_cols = ["구역", "평형대", "단지명", "동", "층/호", "가격(억)표시", "요약내용", "부동산"]
     display_cols = [c for c in display_cols if c in dfq.columns]
 
-    df_show = dfq[display_cols + ["위도", "경도", "동_key", "가격_num"]].copy()
+    df_show = dfq[display_cols + ["위도", "경도", "동_key", "가격_num"]].copy().reset_index(drop=True)
     df_table = df_show[display_cols].copy().rename(columns={"가격(억)표시": "가격(억)"})
 
     st.markdown("표에서 행을 클릭하면 해당 동 위치로 지도가 이동합니다.")
