@@ -107,6 +107,25 @@ def fmt_decimal(x, nd=2) -> str:
     return f"{num:.{nd}f}".rstrip("0").rstrip(".")
 
 
+def dataframe_height(df: pd.DataFrame, max_height: int = 700, row_height: int = 34, header_height: int = 42) -> int:
+    """가능하면 스크롤 없이 보이도록 DataFrame 행 수에 맞춰 높이 계산(상한 max_height)"""
+    n = 0 if df is None else int(len(df))
+    h = header_height + (n * row_height)
+    return max(160, min(h, max_height))
+
+
+def st_df(obj, **kwargs):
+    """
+    Streamlit 버전에 따라 hide_index 지원 여부가 달라서 안전하게 처리.
+    - 지원하면 hide_index=True 적용
+    - 미지원이면 기존 동작 유지
+    """
+    try:
+        return st.dataframe(obj, hide_index=True, **kwargs)
+    except TypeError:
+        return st.dataframe(obj, **kwargs)
+
+
 def to_eok_display(value) -> str:
     """원 단위면 억으로 환산, 이미 억이면 그대로"""
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -209,10 +228,16 @@ def get_service_account_info():
 
         # gs 자체가 service account 필드들을 포함한다고 가정
         keys = [
-            "type", "project_id", "private_key_id", "private_key",
-            "client_email", "client_id",
-            "auth_uri", "token_uri",
-            "auth_provider_x509_cert_url", "client_x509_cert_url",
+            "type",
+            "project_id",
+            "private_key_id",
+            "private_key",
+            "client_email",
+            "client_id",
+            "auth_uri",
+            "token_uri",
+            "auth_provider_x509_cert_url",
+            "client_x509_cert_url",
         ]
         sa = {k: gs[k] for k in keys if k in gs}
 
@@ -391,7 +416,6 @@ def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
 st.set_page_config(layout="wide")
 st.title("압구정 매물 지도 MVP (상태=활성, 수동 갱신)")
 
-# (사이드바 제거) 필터/갱신 UI를 본문 상단에 배치
 st.subheader("필터")
 only_active = st.checkbox("상태=활성만 표시", value=True)
 
@@ -407,7 +431,6 @@ with col_b:
 
 st.caption("지도는 클릭 이벤트만 수신(드래그/줌 시 자동 새로고침 없음).")
 
-
 # ====== Load ======
 df_list, df_loc, df_trade, client_email = load_data()
 if client_email:
@@ -417,6 +440,15 @@ if client_email:
 if "층/호" not in df_list.columns and "층수" in df_list.columns:
     df_list = df_list.copy()
     df_list["층/호"] = df_list["층수"]
+
+# 요약내용 컬럼 보정: 표 표시용으로 '요약내용'을 항상 보장
+summary_src = pick_first_existing_column(df_list, ["요약내용", "요약 내용", "요약", "설명", "비고", "메모"])
+if "요약내용" not in df_list.columns:
+    df_list["요약내용"] = df_list[summary_src] if summary_src else ""
+elif summary_src and summary_src != "요약내용":
+    # 이미 '요약내용'이 있지만 다른 요약 컬럼이 따로 있으면, 빈 값만 보완
+    left = df_list["요약내용"].astype(str).str.strip()
+    df_list.loc[left.eq(""), "요약내용"] = df_list.loc[left.eq(""), summary_src]
 
 need_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "상태"]
 missing = [c for c in need_cols if c not in df_list.columns]
@@ -476,8 +508,16 @@ gdf = build_grouped(df_view)
 
 # 구역별 색상
 palette = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
 ]
 areas = sorted([a for a in gdf["구역"].dropna().astype(str).unique()])
 area_color = {a: palette[i % len(palette)] for i, a in enumerate(areas)}
@@ -516,7 +556,11 @@ m = folium.Map(
 marker_rows = []
 for _, r in gdf.iterrows():
     marker_rows.append(
-        (r["위도"], r["경도"], {"단지명": r["단지명"], "동_key": r["동_key"], "구역": r["구역"], "위도": r["위도"], "경도": r["경도"]})
+        (
+            r["위도"],
+            r["경도"],
+            {"단지명": r["단지명"], "동_key": r["동_key"], "구역": r["구역"], "위도": r["위도"], "경도": r["경도"]},
+        )
     )
 
 # 마커: 투명 히트박스 + 라벨
@@ -544,7 +588,7 @@ for _, r in gdf.iterrows():
         tooltip=tooltip,
     ).add_to(m)
 
-# (지도 영역 확장) 좌측(지도) 컬럼 비율을 키움
+# 지도 영역 확장 (좌측 컬럼 비율 확대)
 col_map, col_right = st.columns([1.7, 1])
 
 with col_map:
@@ -588,10 +632,15 @@ with col_right:
 
     df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] == dong)].copy()
 
-    # (위도/경도 제거)
-    show_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "상태"]
+    show_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "요약내용", "부동산", "상태"]
     show_cols = [c for c in show_cols if c in df_pick.columns]
-    st.dataframe(df_pick[show_cols], use_container_width=True)
+
+    view_pick = df_pick[show_cols]
+    st_df(
+        view_pick,
+        use_container_width=True,
+        height=dataframe_height(view_pick, max_height=650),
+    )
 
     st.divider()
     st.subheader("선택 구역 평형별 요약 (활성 매물)")
@@ -602,9 +651,11 @@ with col_right:
         if summary.empty:
             st.info("해당 구역에서 요약할 데이터가 없습니다.")
         else:
-            st.dataframe(
-                summary[["평형", "매물건수", "가격대(최저~최고)", "최저가격", "최고가격"]],
+            summary_view = summary[["평형", "매물건수", "가격대(최저~최고)", "최저가격", "최고가격"]]
+            st_df(
+                summary_view,
                 use_container_width=True,
+                height=dataframe_height(summary_view, max_height=380),
             )
 
     st.divider()
@@ -626,7 +677,17 @@ with col_right:
         if trades.empty:
             st.info("일치하는 거래내역이 없습니다.")
         else:
-            st.dataframe(trades.style.set_properties(**{"color": "red"}), use_container_width=True)
+            styled = trades.style.set_properties(**{"color": "red"})
+            try:
+                styled = styled.hide(axis="index")  # pandas Styler 지원 시 행번호 숨김
+            except Exception:
+                pass
+
+            st.dataframe(
+                styled,
+                use_container_width=True,
+                height=dataframe_height(trades, max_height=240),
+            )
 
     # ====== 우측 하단: 빠른 필터/정렬 ======
     st.divider()
@@ -670,9 +731,9 @@ with col_right:
 
     st.markdown("표에서 행을 클릭하면 해당 동 위치로 지도가 이동합니다.")
 
-    event = st.dataframe(
+    event = st_df(
         df_table,
-        height=260,
+        height=dataframe_height(df_table, max_height=650),
         use_container_width=True,
         on_select="rerun",
         selection_mode="single-row",
