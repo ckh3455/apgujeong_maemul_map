@@ -407,6 +407,7 @@ div[data-testid="stDataFrame"] div[role="grid"] {
     unsafe_allow_html=True,
 )
 
+# (사이드바 제거) 필터를 본문 상단에 배치
 st.subheader("필터")
 only_active = st.checkbox("상태=활성만 표시", value=True)
 
@@ -432,31 +433,25 @@ if "층/호" not in df_list.columns and "층수" in df_list.columns:
     df_list = df_list.copy()
     df_list["층/호"] = df_list["층수"]
 
-# --- 요약내용 컬럼명 표준화/보장 (시트에 '요약내용'이 있는데 앱에서 못 잡는 문제 방지) ---
+# --- 요약내용 컬럼명 표준화/보장 ---
 df_list = df_list.copy()
 rename_map = {}
 for c in df_list.columns:
     c0 = str(c)
     c_norm = re.sub(r"\s+", "", c0)  # 공백 제거
-    # '요약내용' 또는 유사 형태를 강제로 '요약내용'으로 통일
     if c_norm == "요약내용" or ("요약" in c_norm and "내용" in c_norm):
         rename_map[c] = "요약내용"
-    elif c_norm in ["요약", "요약내용요", "설명", "비고", "메모"] and "요약내용" not in df_list.columns:
-        # (선택) 시트가 요약내용 대신 다른 이름만 쓰는 경우 대비
-        # 단, 실제로 '요약내용' 컬럼이 이미 있으면 덮어쓰지 않음
-        rename_map[c] = c0  # 그대로 두고 아래에서 복사할 source 후보로 사용
 
 if rename_map:
     df_list.rename(columns=rename_map, inplace=True)
 
-# 요약내용 컬럼 보장: 없으면 후보에서 복사해서 생성
 summary_src = pick_first_existing_column(df_list, ["요약내용", "요약 내용", "요약", "설명", "비고", "메모"])
 if "요약내용" not in df_list.columns:
     df_list["요약내용"] = df_list[summary_src] if summary_src else ""
 elif summary_src and summary_src != "요약내용":
     left = df_list["요약내용"].astype(str).str.strip()
     df_list.loc[left.eq(""), "요약내용"] = df_list.loc[left.eq(""), summary_src]
-# -------------------------------------------------------------------------------
+# -------------------------------
 
 need_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "상태"]
 missing = [c for c in need_cols if c not in df_list.columns]
@@ -582,6 +577,7 @@ for _, r in gdf.iterrows():
         tooltip=tooltip,
     ).add_to(m)
 
+# 지도 영역 확장 (좌측 컬럼 비율 확대)
 col_map, col_right = st.columns([1.7, 1])
 
 with col_map:
@@ -624,16 +620,47 @@ with col_right:
 
     df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] == dong)].copy()
 
-    # 위도/경도 제거 + 요약내용 포함(표시 보장)
-    show_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "요약내용", "부동산", "상태"]
+    # ===== 요청 반영 =====
+    # 1) 컬럼 순서: '요약내용' 앞에 '부동산' 오도록
+    # 2) 폭 조정: '구역','동'은 더 좁게 / '평형','층/호','가격'도 좁게(요약내용 공간 확보)
+    show_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "요약내용", "상태"]
     show_cols = [c for c in show_cols if c in df_pick.columns]
-
     view_pick = df_pick[show_cols].reset_index(drop=True)
-    st_df(
-        view_pick,
-        use_container_width=True,
-        height=dataframe_height(view_pick, max_height=650),
-    )
+
+    # column_config는 Streamlit 버전에 따라 미지원일 수 있어 안전 처리
+    col_cfg = None
+    try:
+        col_cfg = {
+            "구역": st.column_config.TextColumn("구역", width="small"),
+            "동": st.column_config.TextColumn("동", width="small"),
+            "평형": st.column_config.TextColumn("평형", width="small"),
+            "층/호": st.column_config.TextColumn("층/호", width="small"),
+            "가격": st.column_config.NumberColumn("가격", width="small"),
+            "요약내용": st.column_config.TextColumn("요약내용", width="large"),
+            "단지명": st.column_config.TextColumn("단지명", width="medium"),
+            "대지지분": st.column_config.TextColumn("대지지분", width="medium"),
+            "부동산": st.column_config.TextColumn("부동산", width="medium"),
+            "상태": st.column_config.TextColumn("상태", width="small"),
+            "평형대": st.column_config.TextColumn("평형대", width="small"),
+        }
+        col_cfg = {k: v for k, v in col_cfg.items() if k in view_pick.columns}
+    except Exception:
+        col_cfg = None
+
+    try:
+        st_df(
+            view_pick,
+            use_container_width=True,
+            height=dataframe_height(view_pick, max_height=650),
+            column_config=col_cfg,
+        )
+    except TypeError:
+        st_df(
+            view_pick,
+            use_container_width=True,
+            height=dataframe_height(view_pick, max_height=650),
+        )
+    # =====================
 
     st.divider()
     st.subheader("선택 구역 평형별 요약 (활성 매물)")
