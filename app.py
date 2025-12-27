@@ -340,7 +340,7 @@ def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_v
     if t.empty:
         return pd.DataFrame()
 
-    t["_dt"] = pd.to_datetime(t[col_date], errors="coerce", yearfirst=True)
+    t["_dt"] = pd.to_datetime(t[col_date], errors="coerce", format="%y.%m.%d")
     t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(3).copy()
 
     price_col = pick_first_existing_column(t, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
