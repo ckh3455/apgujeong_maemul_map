@@ -753,24 +753,15 @@ with col_right:
         else:
             area_labels[an] = str(an)
 
-    # 세션 초기화/보정
+    # 세션 초기화: 기본은 '전체' (지도 클릭과 무관)
     if "quick_filter_area_norm" not in st.session_state:
-        st.session_state["quick_filter_area_norm"] = area_norm if area_norm else "__ALL__"
+        st.session_state["quick_filter_area_norm"] = "__ALL__"
 
-    # 현재 마커 구역이 바뀌었으면(새 클릭) 선택값이 비어있을 때만 따라가도록
-    if st.session_state.get("quick_filter_area_norm") in [None, "", "__NO_SUCH_AREA__"]:
-        st.session_state["quick_filter_area_norm"] = area_norm if area_norm else "__ALL__"
-
-    # 선택값이 실제 목록에 없으면, 마커 구역 -> 첫 구역 -> 전체 순으로 폴백
+    # 선택값이 실제 목록에 없으면 '전체'로 폴백
     sel_area_norm = st.session_state.get("quick_filter_area_norm", "__ALL__")
     if sel_area_norm != "__ALL__" and sel_area_norm not in area_labels:
-        if area_norm and area_norm in area_labels:
-            sel_area_norm = area_norm
-        elif len(area_norms) > 0:
-            sel_area_norm = area_norms[0]
-        else:
-            sel_area_norm = "__ALL__"
-        st.session_state["quick_filter_area_norm"] = sel_area_norm
+        sel_area_norm = "__ALL__"
+        st.session_state["quick_filter_area_norm"] = "__ALL__"
 
     st.markdown("**구역 선택**")
     aleft, aright = st.columns(2)
