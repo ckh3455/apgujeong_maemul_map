@@ -819,17 +819,32 @@ with col_right:
     if dfq.empty:
         st.info("조건에 맞는 매물이 없습니다.")
     else:
-        display_cols = ["구역", "평형대", "단지명", "동", "층/호", "가격(억)표시", "요약내용", "부동산"]
-        display_cols = [c for c in display_cols if c in dfq.columns]
+        # 표시 컬럼 요구사항:
+        # 구역, 평형대, 평형, 단지명, 동, 층/호, 가격, 요약내용, 부동산
+        # - 시트에 따라 '가격'이 없고 '가격(억)표시'만 있을 수 있으므로 fallback 처리
+        display_cols = ["구역", "평형대", "평형", "단지명", "동", "층/호", "가격", "요약내용", "부동산"]
+        cols_exist = [c for c in display_cols if c in dfq.columns]
 
-        df_show = dfq[display_cols + ["위도", "경도", "동_key", "가격_num"]].copy().reset_index(drop=True)
-        df_table = df_show[display_cols].copy().rename(columns={"가격(억)표시": "가격(억)"})
+        # fallback: '가격'이 없으면 '가격(억)표시'를 '가격'으로 대체
+        rename_map = {}
+        if "가격" not in cols_exist and "가격(억)표시" in dfq.columns:
+            cols_exist = [c for c in cols_exist if c != "가격"]
+            cols_exist.append("가격(억)표시")
+            rename_map["가격(억)표시"] = "가격"
+
+        # 데이터는 절대 head/limit 하지 않고, 조건에 맞는 전체를 그대로 보여줍니다.
+        df_show = dfq[cols_exist + ["위도", "경도", "동_key", "가격_num"]].copy().reset_index(drop=True)
+        df_table = df_show[cols_exist].copy()
+        if rename_map:
+            df_table = df_table.rename(columns=rename_map)
+
+        st.caption(f"해당 조건 매물: {len(df_table):,}건 (표는 스크롤로 전체 확인 가능합니다)")
 
         st.markdown("표에서 행을 클릭하면 해당 동 위치로 지도가 이동합니다.")
 
         event = st_df(
             df_table,
-            height=dataframe_height(df_table, max_height=650),
+            height=dataframe_height(df_table, max_height=900),
             use_container_width=True,
             on_select="rerun",
             selection_mode="single-row",
