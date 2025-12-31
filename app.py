@@ -714,34 +714,101 @@ with col_left:
 with col_right:
     st.subheader("빠른 필터 (활성 매물)")
 
+    # -----------------------------
+    # (A) 평형대 필터: 상단
+    # -----------------------------
     c0, c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1, 1, 1, 1, 1.2])
 
     buckets = [20, 30, 40, 50, 60, 70, 80]
     cols = [c0, c1, c2, c3, c4, c5, c6]
     for col, b in zip(cols, buckets):
-        if col.button(f"{b}평대", use_container_width=True):
+        if col.button(f"{b}평대", use_container_width=True, key=f"qsize_{b}"):
             st.session_state["quick_filter_mode"] = "size"
             st.session_state["quick_filter_bucket"] = b
             st.rerun()
 
-    if c7.button("가격순", use_container_width=True):
+    if c7.button("가격순", use_container_width=True, key="qprice"):
         st.session_state["quick_filter_mode"] = "price"
         st.rerun()
 
     mode = st.session_state["quick_filter_mode"]
-    area_display = f"{area_norm}구역" if area_norm else str(area_value).strip()
-    if not area_norm:
-        st.info("선택한 마커의 구역 정보가 없습니다.")
-        area_norm = "__NO_SUCH_AREA__"
+
+    # -----------------------------
+    # (B) 구역 필터: 하단(2단 버튼)
+    # - 본 시트의 '구역' 컬럼을 읽어 동적으로 구성
+    # - 기본값: 지도에서 클릭한 마커의 구역
+    # -----------------------------
+    df_area = df_view[["구역"]].copy()
+    df_area["_area_norm"] = df_area["구역"].astype(str).map(norm_area)
+    df_area = df_area[df_area["_area_norm"].astype(str).str.strip() != ""].copy()
+
+    area_norms = sorted(df_area["_area_norm"].dropna().astype(str).unique().tolist(),
+                        key=lambda x: (0, int(x)) if str(x).isdigit() else (1, str(x)))
+
+    area_labels = {}
+    for an in area_norms:
+        if str(an).isdigit():
+            area_labels[an] = f"{int(an)}구역"
+        else:
+            area_labels[an] = str(an)
+
+    # 세션 초기화/보정
+    if "quick_filter_area_norm" not in st.session_state:
+        st.session_state["quick_filter_area_norm"] = area_norm if area_norm else "__ALL__"
+
+    # 현재 마커 구역이 바뀌었으면(새 클릭) 선택값이 비어있을 때만 따라가도록
+    if st.session_state.get("quick_filter_area_norm") in [None, "", "__NO_SUCH_AREA__"]:
+        st.session_state["quick_filter_area_norm"] = area_norm if area_norm else "__ALL__"
+
+    # 선택값이 실제 목록에 없으면, 마커 구역 -> 첫 구역 -> 전체 순으로 폴백
+    sel_area_norm = st.session_state.get("quick_filter_area_norm", "__ALL__")
+    if sel_area_norm != "__ALL__" and sel_area_norm not in area_labels:
+        if area_norm and area_norm in area_labels:
+            sel_area_norm = area_norm
+        elif len(area_norms) > 0:
+            sel_area_norm = area_norms[0]
+        else:
+            sel_area_norm = "__ALL__"
+        st.session_state["quick_filter_area_norm"] = sel_area_norm
+
+    st.markdown("**구역 선택**")
+    aleft, aright = st.columns(2)
+
+    # '전체' 버튼 포함
+    all_label = "[선택] 전체" if sel_area_norm == "__ALL__" else "전체"
+    if aleft.button(all_label, use_container_width=True, key="qarea_all"):
+        st.session_state["quick_filter_area_norm"] = "__ALL__"
+        st.rerun()
+
+    # 구역 버튼(2단)
+    for i, an in enumerate(area_norms):
+        label = area_labels.get(an, str(an))
+        btn_label = f"[선택] {label}" if an == sel_area_norm else label
+        target_col = aleft if (i % 2 == 0) else aright
+        if target_col.button(btn_label, use_container_width=True, key=f"qarea_{an}"):
+            st.session_state["quick_filter_area_norm"] = an
+            st.rerun()
+
+    # -----------------------------
+    # (C) 결과 표시
+    # - 선택 구역 내(또는 전체)에서 가격 오름차순
+    # -----------------------------
+    if sel_area_norm == "__ALL__":
+        area_display = "전체"
+    else:
+        area_display = area_labels.get(sel_area_norm, f"{sel_area_norm}구역")
+
     if mode == "size":
         st.caption(f"현재: {area_display} / {st.session_state['quick_filter_bucket']}평대 (가격 낮은 순)")
     else:
-        st.caption(f"현재: {area_display} / 전체 (가격 낮은 순)")
+        st.caption(f"현재: {area_display} / 전체 평형 (가격 낮은 순)")
 
     dfq = df_view.copy()
     dfq = dfq[dfq["가격_num"].notna()].copy()
     dfq["_area_norm"] = dfq["구역"].astype(str).map(norm_area)
-    dfq = dfq[dfq["_area_norm"] == area_norm].copy()
+
+    if sel_area_norm != "__ALL__":
+        dfq = dfq[dfq["_area_norm"] == sel_area_norm].copy()
 
     if mode == "size":
         b = st.session_state["quick_filter_bucket"]
@@ -749,42 +816,44 @@ with col_right:
 
     dfq = dfq.sort_values("가격_num", ascending=True).reset_index(drop=True)
 
-    display_cols = ["구역", "평형대", "단지명", "동", "층/호", "가격(억)표시", "요약내용", "부동산"]
-    display_cols = [c for c in display_cols if c in dfq.columns]
+    if dfq.empty:
+        st.info("조건에 맞는 매물이 없습니다.")
+    else:
+        display_cols = ["구역", "평형대", "단지명", "동", "층/호", "가격(억)표시", "요약내용", "부동산"]
+        display_cols = [c for c in display_cols if c in dfq.columns]
 
-    df_show = dfq[display_cols + ["위도", "경도", "동_key", "가격_num"]].copy().reset_index(drop=True)
-    df_table = df_show[display_cols].copy().rename(columns={"가격(억)표시": "가격(억)"})
+        df_show = dfq[display_cols + ["위도", "경도", "동_key", "가격_num"]].copy().reset_index(drop=True)
+        df_table = df_show[display_cols].copy().rename(columns={"가격(억)표시": "가격(억)"})
 
-    st.markdown("표에서 행을 클릭하면 해당 동 위치로 지도가 이동합니다.")
+        st.markdown("표에서 행을 클릭하면 해당 동 위치로 지도가 이동합니다.")
 
-    event = st_df(
-        df_table,
-        height=dataframe_height(df_table, max_height=650),
-        use_container_width=True,
-        on_select="rerun",
-        selection_mode="single-row",
-    )
+        event = st_df(
+            df_table,
+            height=dataframe_height(df_table, max_height=650),
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+        )
 
-    try:
-        if event and event.selection and event.selection.rows:
-            ridx = event.selection.rows[0]
-            row = df_show.iloc[ridx]
+        try:
+            if event and event.selection and event.selection.rows:
+                ridx = event.selection.rows[0]
+                row = df_show.iloc[ridx]
 
-            sel_sig = f"{row.get('단지명','')}|{row.get('동_key','')}|{row.get('평형대','')}|{row.get('가격_num','')}"
-            if st.session_state["last_table_sel_sig"] != sel_sig:
-                st.session_state["map_center"] = [float(row["위도"]), float(row["경도"])]
-                st.session_state["map_zoom"] = int(st.session_state.get("map_zoom") or DEFAULT_ZOOM)
+                sel_sig = f"{row.get('단지명','')}|{row.get('동_key','')}|{row.get('평형대','')}|{row.get('가격_num','')}"
+                if st.session_state["last_table_sel_sig"] != sel_sig:
+                    st.session_state["map_center"] = [float(row["위도"]), float(row["경도"])]
+                    st.session_state["map_zoom"] = int(st.session_state.get("map_zoom") or DEFAULT_ZOOM)
 
-                st.session_state["selected_meta"] = {
-                    "단지명": row["단지명"],
-                    "동_key": row["동_key"],
-                    "구역": row["구역"],
-                    "위도": float(row["위도"]),
-                    "경도": float(row["경도"]),
-                }
-                st.session_state["last_table_sel_sig"] = sel_sig
-                st.session_state["last_click_sig"] = ""
-                st.rerun()
-    except Exception:
-        pass
-
+                    st.session_state["selected_meta"] = {
+                        "단지명": row["단지명"],
+                        "동_key": row["동_key"],
+                        "구역": row["구역"],
+                        "위도": float(row["위도"]),
+                        "경도": float(row["경도"]),
+                    }
+                    st.session_state["last_table_sel_sig"] = sel_sig
+                    st.session_state["last_click_sig"] = ""
+                    st.rerun()
+        except Exception:
+            pass
