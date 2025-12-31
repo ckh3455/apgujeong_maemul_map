@@ -407,25 +407,15 @@ div[data-testid="stDataFrame"] div[role="grid"] {
     unsafe_allow_html=True,
 )
 
-st.subheader("필터")
-only_active = st.checkbox("상태=활성만 표시", value=True)
+# (UI 간소화) 지도 상단: "데이터 새로고침"만 표시
+only_active = True
 
-col_a, col_b = st.columns(2)
-with col_a:
-    if st.button("데이터 새로고침"):
-        load_data.clear()
-        st.rerun()
-with col_b:
-    if st.button("캐시만 비우기"):
-        load_data.clear()
-        st.success("캐시를 비웠습니다. (다음 실행 때 새로 로드)")
-
-st.caption("지도는 클릭 이벤트만 수신(드래그/줌 시 자동 새로고침 없음).")
+if st.button("데이터 새로고침"):
+    load_data.clear()
+    st.rerun()
 
 # ====== Load ======
 df_list, df_loc, df_trade, client_email = load_data()
-if client_email:
-    st.caption(f"서비스계정: {client_email}")
 
 # 층/호 보정
 if "층/호" not in df_list.columns and "층수" in df_list.columns:
@@ -469,17 +459,22 @@ df_loc = df_loc.copy()
 if "동" in df_loc.columns:
     df_loc["동_key"] = df_loc["동"].apply(dong_key)
 
-# 활성 필터
-df_view = df_list
+# 활성 필터 (UI는 숨기되 동작은 "활성" 고정)
+df_view = df_list.copy()
 if only_active:
     df_view = df_view[df_view["상태"].astype(str).str.strip() == "활성"].copy()
 
-# 좌표 숫자화
+if df_view.empty:
+    st.warning("현재 표시할 매물이 없습니다.")
+    st.stop()
+
+# 좌표 숫자화 (좌표가 없는 매물도 표에는 포함되어야 하므로 dropna 하지 않음)
 df_view["위도"] = df_view["위도"].apply(to_float)
 df_view["경도"] = df_view["경도"].apply(to_float)
 
 # 위치정보 탭으로 좌표 보강
 if all(c in df_loc.columns for c in ["단지명", "동_key", "위도", "경도"]):
+    df_loc = df_loc.copy()
     df_loc["위도"] = df_loc["위도"].apply(to_float)
     df_loc["경도"] = df_loc["경도"].apply(to_float)
 
@@ -492,20 +487,18 @@ if all(c in df_loc.columns for c in ["단지명", "동_key", "위도", "경도"]
     df_view["경도"] = df_view["경도"].fillna(df_view["경도_loc"])
     df_view.drop(columns=["위도_loc", "경도_loc"], inplace=True)
 
-df_view = df_view.dropna(subset=["위도", "경도"]).copy()
-if df_view.empty:
-    st.warning("현재 표시할 활성 매물이 없거나 좌표가 없습니다.")
-    st.stop()
-
-# 평형대/가격 정규화 컬럼
+# 평형대/가격 정규화 컬럼 (전체 매물 기준)
 df_view = df_view.copy()
 df_view["가격_num"] = pd.to_numeric(df_view["가격"], errors="coerce")
 df_view["평형대_num"] = df_view["평형대"].map(parse_pyeong_num)
 df_view["평형대_bucket"] = df_view["평형대_num"].apply(pyeong_bucket_10)
 df_view["가격(억)표시"] = df_view["가격_num"].map(lambda v: fmt_decimal(v, 2))
 
+# 지도/마커용 데이터프레임(좌표가 있는 매물만)
+df_map = df_view.dropna(subset=["위도", "경도"]).copy()
+
 # 그룹(동 단위 포인트)
-gdf = build_grouped(df_view)
+gdf = build_grouped(df_map)
 
 # 구역별 색상
 palette = [
@@ -520,7 +513,15 @@ DEFAULT_ZOOM = 16
 
 # 상태 변수
 if "map_center" not in st.session_state:
-    st.session_state["map_center"] = [float(gdf["위도"].mean()), float(gdf["경도"].mean())]
+    try:
+        lat0 = float(pd.to_numeric(gdf["위도"], errors="coerce").mean())
+        lng0 = float(pd.to_numeric(gdf["경도"], errors="coerce").mean())
+        if pd.isna(lat0) or pd.isna(lng0):
+            raise ValueError("NaN center")
+        st.session_state["map_center"] = [lat0, lng0]
+    except Exception:
+        # 좌표가 없는 경우(또는 계산 실패)에는 압구정 기본 중심값
+        st.session_state["map_center"] = [37.5275, 127.0300]
 if "map_zoom" not in st.session_state:
     st.session_state["map_zoom"] = DEFAULT_ZOOM
 if "selected_meta" not in st.session_state:
@@ -580,7 +581,7 @@ for _, r in gdf.iterrows():
 st.subheader("지도")
 out = st_folium(
     m,
-    height=650,
+    height=455,
     width=None,
     returned_objects=["last_object_clicked"],
     key="map",
@@ -849,26 +850,33 @@ with col_right:
             on_select="rerun",
             selection_mode="single-row",
         )
-
         try:
-            if event and event.selection and event.selection.rows:
+            if event and getattr(event, "selection", None) and event.selection.rows:
                 ridx = event.selection.rows[0]
                 row = df_show.iloc[ridx]
 
                 sel_sig = f"{row.get('단지명','')}|{row.get('동_key','')}|{row.get('평형대','')}|{row.get('가격_num','')}"
                 if st.session_state["last_table_sel_sig"] != sel_sig:
-                    st.session_state["map_center"] = [float(row["위도"]), float(row["경도"])]
-                    st.session_state["map_zoom"] = int(st.session_state.get("map_zoom") or DEFAULT_ZOOM)
-
-                    st.session_state["selected_meta"] = {
-                        "단지명": row["단지명"],
-                        "동_key": row["동_key"],
-                        "구역": row["구역"],
-                        "위도": float(row["위도"]),
-                        "경도": float(row["경도"]),
-                    }
                     st.session_state["last_table_sel_sig"] = sel_sig
-                    st.session_state["last_click_sig"] = ""
-                    st.rerun()
+
+                    # 좌표가 있는 경우에만 지도 이동/마커 선택 동기화
+                    latv = pd.to_numeric(row.get("위도"), errors="coerce")
+                    lngv = pd.to_numeric(row.get("경도"), errors="coerce")
+                    if pd.isna(latv) or pd.isna(lngv):
+                        st.warning("선택한 매물은 좌표가 없어 지도를 이동할 수 없습니다. (목록은 정상 표시됩니다)")
+                    else:
+                        st.session_state["map_center"] = [float(latv), float(lngv)]
+                        st.session_state["map_zoom"] = int(st.session_state.get("map_zoom") or DEFAULT_ZOOM)
+
+                        st.session_state["selected_meta"] = {
+                            "단지명": row["단지명"],
+                            "동_key": row["동_key"],
+                            "구역": row["구역"],
+                            "위도": float(latv),
+                            "경도": float(lngv),
+                        }
+                        st.session_state["last_click_sig"] = ""
+                        st.rerun()
         except Exception:
             pass
+
