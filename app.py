@@ -619,7 +619,31 @@ df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] =
 # ===== 요청 반영 (정확 적용) =====
 # - '평형대','구역' 제거
 # - '부동산'을 '요약내용' 앞에 배치
-show_cols = ["단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "요약내용", "상태"]
+# - '상태'는 숨기고, '평당가'를 계산하여 표시 (가격/평형, 단위: 억)
+df_pick = df_pick.copy()
+
+# 평형: '56평' -> 56
+if "평형" in df_pick.columns:
+    df_pick["_평형_num"] = df_pick["평형"].map(parse_pyeong_num)
+else:
+    df_pick["_평형_num"] = None
+
+# 가격: 숫자 변환 (이미 억 단위 입력을 전제로 함)
+if "가격" in df_pick.columns:
+    df_pick["_가격_num"] = pd.to_numeric(df_pick["가격"], errors="coerce")
+else:
+    df_pick["_가격_num"] = None
+
+def _calc_pyeong_price(row) -> str:
+    p = row.get("_평형_num", None)
+    pr = row.get("_가격_num", None)
+    if p is None or pr is None or pd.isna(p) or pd.isna(pr) or float(p) == 0:
+        return ""
+    return f"{fmt_decimal(float(pr) / float(p), nd=2)}억"
+
+df_pick["평당가"] = df_pick.apply(_calc_pyeong_price, axis=1)
+
+show_cols = ["단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "요약내용", "평당가"]
 show_cols = [c for c in show_cols if c in df_pick.columns]
 view_pick = df_pick[show_cols].reset_index(drop=True)
 
@@ -635,11 +659,12 @@ try:
         "가격": st.column_config.NumberColumn("가격", width="small"),
         "부동산": st.column_config.TextColumn("부동산", width="small"),
         "요약내용": st.column_config.TextColumn("요약내용", width="large"),
-        "상태": st.column_config.TextColumn("상태", width="small"),
+        "평당가": st.column_config.TextColumn("평당가", width="small"),
     }
     col_cfg = {k: v for k, v in col_cfg.items() if k in view_pick.columns}
 except Exception:
     col_cfg = None
+
 
 try:
     st_df(
