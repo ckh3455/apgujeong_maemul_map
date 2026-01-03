@@ -597,11 +597,10 @@ if out:
             if st.session_state["last_click_sig"] != click_sig:
                 meta = resolve_clicked_meta(lat, lng, marker_rows)
                 if meta:
+                    # 마커 클릭 시: 지도 아래 출력만 바뀌게 selected_meta만 갱신
                     st.session_state["selected_meta"] = meta
-                    st.session_state["map_center"] = [float(meta["위도"]), float(meta["경도"])]
-                    st.session_state["map_zoom"] = int(st.session_state.get("map_zoom") or DEFAULT_ZOOM)
                     st.session_state["last_click_sig"] = click_sig
-                    st.rerun()
+
 
 st.subheader("선택한 동의 활성 매물")
 
