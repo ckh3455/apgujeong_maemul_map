@@ -127,7 +127,7 @@ def st_df(obj, **kwargs):
 
 
 def to_eok_display(value) -> str:
-    """원 단위면 억으로 환산, 이미 억이면 그대로"""
+    """원 단위면 억으로 환산, 이미 억이면 그대로 (표시용)"""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
     num = pd.to_numeric(value, errors="coerce")
@@ -136,6 +136,18 @@ def to_eok_display(value) -> str:
     if num >= 1e8:
         num = num / 1e8
     return fmt_decimal(num, nd=2)
+
+
+def to_eok_num(value) -> float | None:
+    """입력이 원(>=1e8)이면 억으로 환산, 억이면 그대로 (계산용 숫자 반환)"""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    num = pd.to_numeric(value, errors="coerce")
+    if pd.isna(num):
+        return None
+    if num >= 1e8:
+        num = num / 1e8
+    return float(num)
 
 
 def make_circle_label_html(label: str, bg_color: str) -> str:
@@ -317,6 +329,11 @@ def summarize_area_by_size(df_active: pd.DataFrame, area_value: str) -> pd.DataF
 
 
 def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_value: str) -> pd.DataFrame:
+    """
+    거래내역 최신 5건:
+    - 날짜, 구역, 단지, 평형, 가격, 동, 호, 평당가격, 지분당가격
+    - 가격은 억 단위로 표시/계산 (원 단위면 자동 환산)
+    """
     if df_trade is None or df_trade.empty:
         return pd.DataFrame()
 
@@ -326,6 +343,11 @@ def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_v
     col_date = pick_first_existing_column(df_trade, ["날짜", "거래일", "계약일", "일자", "거래일자"])
     if not (col_area and col_complex and col_size and col_date):
         return pd.DataFrame()
+
+    col_price = pick_first_existing_column(df_trade, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
+    col_dong = pick_first_existing_column(df_trade, ["동"])
+    col_ho = pick_first_existing_column(df_trade, ["호", "호수"])
+    col_land = pick_first_existing_column(df_trade, ["대지지분", "지분", "대지지분율"])
 
     t = df_trade.copy()
     t["_area_norm"] = t[col_area].astype(str).map(norm_area)
@@ -340,23 +362,58 @@ def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_v
     if t.empty:
         return pd.DataFrame()
 
+    # 날짜 파싱 후 최신 5건 (기존 포맷 우선, 실패분은 일반 파싱)
     t["_dt"] = pd.to_datetime(t[col_date], errors="coerce", format="%y.%m.%d")
+    t.loc[t["_dt"].isna(), "_dt"] = pd.to_datetime(t.loc[t["_dt"].isna(), col_date], errors="coerce")
     t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(5).copy()
 
-    price_col = pick_first_existing_column(t, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
-    if price_col:
-        t["가격(억)"] = t[price_col].map(to_eok_display)
+    # 계산용 숫자
+    if col_price:
+        t["_price_eok"] = t[col_price].map(to_eok_num)
+    else:
+        t["_price_eok"] = None
 
-    preferred = [col_date, col_area, col_complex, col_size]
-    if "가격(억)" in t.columns:
-        preferred.append("가격(억)")
+    t["_pyeong_num"] = t[col_size].map(parse_pyeong_num)
 
-    for extra in ["동", "호", "비고"]:
-        if extra in t.columns and extra not in preferred:
-            preferred.append(extra)
+    if col_land:
+        t["_land_num"] = t[col_land].map(parse_numeric)
+    else:
+        t["_land_num"] = None
 
-    out = t[preferred].copy()
-    out[col_area] = out[col_area].astype(str).map(lambda v: f"{norm_area(v)}구역" if norm_area(v) else str(v).strip())
+    # 표시용 가격(억)
+    t["가격"] = t["_price_eok"].map(lambda v: f"{fmt_decimal(v, 2)}억" if v is not None and not pd.isna(v) else "")
+
+    # 평당가격(억) = 가격(억) / 평형(평)
+    def _calc_pp(row):
+        pr = row.get("_price_eok", None)
+        py = row.get("_pyeong_num", None)
+        if pr is None or py is None or pd.isna(pr) or pd.isna(py) or float(py) == 0:
+            return ""
+        return f"{fmt_decimal(float(pr) / float(py), 2)}억"
+
+    # 지분당가격(억) = 가격(억) / 대지지분(숫자)
+    def _calc_lp(row):
+        pr = row.get("_price_eok", None)
+        land = row.get("_land_num", None)
+        if pr is None or land is None or pd.isna(pr) or pd.isna(land) or float(land) == 0:
+            return ""
+        return f"{fmt_decimal(float(pr) / float(land), 2)}억"
+
+    t["평당가격"] = t.apply(_calc_pp, axis=1)
+    t["지분당가격"] = t.apply(_calc_lp, axis=1)
+
+    # 표준 컬럼명으로 정리
+    out = pd.DataFrame()
+    out["날짜"] = t["_dt"].dt.strftime("%Y-%m-%d")
+    out["구역"] = t[col_area].astype(str).map(lambda v: f"{norm_area(v)}구역" if norm_area(v) else str(v).strip())
+    out["단지"] = t[col_complex].astype(str)
+    out["평형"] = t[col_size].astype(str)
+    out["가격"] = t["가격"]
+    out["동"] = t[col_dong].astype(str) if col_dong else ""
+    out["호"] = t[col_ho].astype(str) if col_ho else ""
+    out["평당가격"] = t["평당가격"]
+    out["지분당가격"] = t["지분당가격"]
+
     return out
 
 
@@ -757,18 +814,12 @@ else:
     if trades.empty:
         st.info("일치하는 거래내역이 없습니다.")
     else:
-        trades2 = trades.reset_index(drop=True)
-        styled = trades2.style.set_properties(**{"color": "red"})
+        styled = trades.style.set_properties(**{"color": "red"})
         try:
             styled = styled.hide(axis="index")
         except Exception:
             pass
-
-        # HTML 표로 중앙정렬 출력
-        st.markdown(
-            f'<div class="table-center-wrap">{styled.to_html()}</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(f'<div class="table-center-wrap">{styled.to_html()}</div>', unsafe_allow_html=True)
 
 st.divider()
 st.divider()
