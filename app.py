@@ -377,11 +377,39 @@ def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
     return best_meta
 
 
+def parse_numeric(x) -> float | None:
+    """'12.34', '12.34㎡', '약 12.3' 등에서 숫자만 추출"""
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return None
+    s = str(x).strip()
+    m = re.search(r"(\d+(?:\.\d+)?)", s)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except Exception:
+        return None
+
+
+def st_html_table(df: pd.DataFrame, table_class: str = "center-table"):
+    """DataFrame을 HTML 테이블로 렌더링(가운데 정렬)"""
+    if df is None or df.empty:
+        st.info("표시할 데이터가 없습니다.")
+        return
+    d = df.copy()
+    html = d.to_html(index=False, escape=False, classes=table_class)
+    # 헤더에 컬럼별 class 주입(요약내용 등 열 스타일 목적)
+    for col in d.columns:
+        safe = str(col).replace(" ", "")
+        html = html.replace(f"<th>{col}</th>", f'<th class="col-{safe}">{col}</th>')
+    st.markdown(f'<div class="table-center-wrap">{html}</div>', unsafe_allow_html=True)
+
+
 # =================== UI ===================
 st.set_page_config(layout="wide")
 st.title("압구정 매물 지도 MVP (상태=활성, 수동 갱신)")
 
-# 행번호(인덱스) 영역 강제 숨김 (Streamlit 버전 차이 대응)
+# 행번호(인덱스) 영역 강제 숨김 (Streamlit 버전 차이 대응) + HTML 표 중앙정렬 CSS
 st.markdown(
     """
 <style>
@@ -401,6 +429,44 @@ div[data-testid="stDataFrame"] .row_heading {
 /* 일부 버전에서 남는 여백 최소화 */
 div[data-testid="stDataFrame"] div[role="grid"] {
     padding-left: 0 !important;
+}
+
+/* ===== HTML 테이블 가운데 배치/중앙정렬 ===== */
+.table-center-wrap {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+}
+
+table.center-table {
+    border-collapse: collapse;
+    width: 98%;
+    max-width: 1400px;
+    font-size: 14px;
+}
+
+table.center-table th, table.center-table td {
+    border: 1px solid rgba(0,0,0,0.12);
+    padding: 8px 10px;
+    text-align: center;
+    vertical-align: middle;
+}
+
+table.center-table th {
+    background: rgba(0,0,0,0.04);
+    font-weight: 700;
+}
+
+/* 요약내용은 가독성 위해 좌측정렬(원치 않으면 삭제) */
+table.center-table td.col-요약내용,
+table.center-table th.col-요약내용 {
+    text-align: left;
+}
+
+/* 긴 텍스트 줄바꿈 */
+table.center-table td {
+    white-space: normal;
+    word-break: break-word;
 }
 </style>
     """,
@@ -620,6 +686,7 @@ df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] =
 # - '평형대','구역' 제거
 # - '부동산'을 '요약내용' 앞에 배치
 # - '상태'는 숨기고, '평당가'를 계산하여 표시 (가격/평형, 단위: 억)
+# - '대지지분당 가격' 열 추가 (가격/대지지분, 단위: 억)
 df_pick = df_pick.copy()
 
 # 평형: '56평' -> 56
@@ -634,6 +701,7 @@ if "가격" in df_pick.columns:
 else:
     df_pick["_가격_num"] = None
 
+
 def _calc_pyeong_price(row) -> str:
     p = row.get("_평형_num", None)
     pr = row.get("_가격_num", None)
@@ -641,44 +709,32 @@ def _calc_pyeong_price(row) -> str:
         return ""
     return f"{fmt_decimal(float(pr) / float(p), nd=2)}억"
 
+
 df_pick["평당가"] = df_pick.apply(_calc_pyeong_price, axis=1)
 
-show_cols = ["단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "요약내용", "평당가"]
+# 대지지분당 가격
+if "대지지분" in df_pick.columns:
+    df_pick["_대지지분_num"] = df_pick["대지지분"].map(parse_numeric)
+else:
+    df_pick["_대지지분_num"] = None
+
+
+def _calc_land_share_price(row) -> str:
+    land = row.get("_대지지분_num", None)
+    pr = row.get("_가격_num", None)
+    if land is None or pr is None or pd.isna(land) or pd.isna(pr) or float(land) == 0:
+        return ""
+    return f"{fmt_decimal(float(pr) / float(land), nd=2)}억"
+
+
+df_pick["대지지분당 가격"] = df_pick.apply(_calc_land_share_price, axis=1)
+
+show_cols = ["단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "요약내용", "평당가", "대지지분당 가격"]
 show_cols = [c for c in show_cols if c in df_pick.columns]
 view_pick = df_pick[show_cols].reset_index(drop=True)
 
-# 폭: 요약내용을 최대(large), 다른 컬럼은 최대한 small로 눌러 체감상 3배 확보
-col_cfg = None
-try:
-    col_cfg = {
-        "단지명": st.column_config.TextColumn("단지명", width="small"),
-        "평형": st.column_config.TextColumn("평형", width="small"),
-        "대지지분": st.column_config.TextColumn("대지지분", width="small"),
-        "동": st.column_config.TextColumn("동", width="small"),
-        "층/호": st.column_config.TextColumn("층/호", width="small"),
-        "가격": st.column_config.NumberColumn("가격", width="small"),
-        "부동산": st.column_config.TextColumn("부동산", width="small"),
-        "요약내용": st.column_config.TextColumn("요약내용", width="large"),
-        "평당가": st.column_config.TextColumn("평당가", width="small"),
-    }
-    col_cfg = {k: v for k, v in col_cfg.items() if k in view_pick.columns}
-except Exception:
-    col_cfg = None
-
-
-try:
-    st_df(
-        view_pick,
-        use_container_width=True,
-        height=dataframe_height(view_pick, max_height=650),
-        column_config=col_cfg,
-    )
-except TypeError:
-    st_df(
-        view_pick,
-        use_container_width=True,
-        height=dataframe_height(view_pick, max_height=650),
-    )
+# HTML 표로 중앙정렬 출력
+st_html_table(view_pick)
 # ================================
 
 st.divider()
@@ -708,14 +764,13 @@ else:
         except Exception:
             pass
 
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            height=dataframe_height(trades2, max_height=240),
+        # HTML 표로 중앙정렬 출력
+        st.markdown(
+            f'<div class="table-center-wrap">{styled.to_html()}</div>',
+            unsafe_allow_html=True,
         )
 
 st.divider()
-
 st.divider()
 
 col_left, col_right = st.columns([1, 1])
@@ -730,11 +785,7 @@ with col_left:
             st.info("해당 구역에서 요약할 데이터가 없습니다.")
         else:
             summary_view = summary[["평형", "매물건수", "가격대(최저~최고)", "최저가격", "최고가격"]].reset_index(drop=True)
-            st_df(
-                summary_view,
-                use_container_width=True,
-                height=dataframe_height(summary_view, max_height=380),
-            )
+            st_html_table(summary_view)
 
 with col_right:
     st.subheader("빠른 필터 (활성 매물)")
@@ -767,8 +818,10 @@ with col_right:
     df_area["_area_norm"] = df_area["구역"].astype(str).map(norm_area)
     df_area = df_area[df_area["_area_norm"].astype(str).str.strip() != ""].copy()
 
-    area_norms = sorted(df_area["_area_norm"].dropna().astype(str).unique().tolist(),
-                        key=lambda x: (0, int(x)) if str(x).isdigit() else (1, str(x)))
+    area_norms = sorted(
+        df_area["_area_norm"].dropna().astype(str).unique().tolist(),
+        key=lambda x: (0, int(x)) if str(x).isdigit() else (1, str(x))
+    )
 
     area_labels = {}
     for an in area_norms:
@@ -842,22 +895,22 @@ with col_right:
         cols_exist = [c for c in display_cols if c in dfq.columns]
 
         # fallback: '가격'이 없으면 '가격(억)표시'를 '가격'으로 대체
-        rename_map = {}
+        rename_map2 = {}
         if "가격" not in cols_exist and "가격(억)표시" in dfq.columns:
             cols_exist = [c for c in cols_exist if c != "가격"]
             cols_exist.append("가격(억)표시")
-            rename_map["가격(억)표시"] = "가격"
+            rename_map2["가격(억)표시"] = "가격"
 
         # 데이터는 절대 head/limit 하지 않고, 조건에 맞는 전체를 그대로 보여줍니다.
         df_show = dfq[cols_exist + ["위도", "경도", "동_key", "가격_num"]].copy().reset_index(drop=True)
         df_table = df_show[cols_exist].copy()
-        if rename_map:
-            df_table = df_table.rename(columns=rename_map)
+        if rename_map2:
+            df_table = df_table.rename(columns=rename_map2)
 
         st.caption(f"해당 조건 매물: {len(df_table):,}건 (표는 스크롤로 전체 확인 가능합니다)")
-
         st.markdown("표에서 행을 클릭하면 해당 동 위치로 지도가 이동합니다.")
 
+        # 여기 표는 행 클릭 인터랙션이 필요하므로 st.dataframe 유지
         event = st_df(
             df_table,
             height=dataframe_height(df_table, max_height=900),
@@ -894,4 +947,3 @@ with col_right:
                         st.rerun()
         except Exception:
             pass
-
