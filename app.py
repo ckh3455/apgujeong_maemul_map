@@ -150,6 +150,20 @@ def to_eok_num(value) -> float | None:
     return float(num)
 
 
+def parse_numeric(x) -> float | None:
+    """'12.34', '12.34㎡', '약 12.3' 등에서 숫자만 추출"""
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return None
+    s = str(x).strip()
+    m = re.search(r"(\d+(?:\.\d+)?)", s)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except Exception:
+        return None
+
+
 def make_circle_label_html(label: str, bg_color: str) -> str:
     size = 30
     return f"""
@@ -332,23 +346,24 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
     """
     거래내역 최신 5건:
     - 날짜, 구역, 단지, 평형, 가격, 동, 호, 평당가격, 지분당가격
-    - 지분당가격은 우선 거래내역 탭의 지분 컬럼을 사용하고,
-      없으면 '매매물건 목록(df_listing)'에서 (구역/단지/평형/동) 매칭으로 대지지분을 가져와 계산
+    - 지분당가격은 거래내역 탭에 지분 컬럼이 없으면,
+      '매매물건 목록(df_listing)'에서 (구역/단지/평형/동) 일치로 대지지분을 가져와 계산
     """
     if df_trade is None or df_trade.empty:
         return pd.DataFrame()
 
+    # 거래내역 탭(스크린샷 기준: 구역/날짜/단지/평형/동/호/금액 ...)
     col_area = pick_first_existing_column(df_trade, ["구역"])
+    col_date = pick_first_existing_column(df_trade, ["날짜", "거래일", "계약일", "일자", "거래일자"])
     col_complex = pick_first_existing_column(df_trade, ["단지", "단지명", "단지명(단지)"])
     col_size = pick_first_existing_column(df_trade, ["평형", "평형대"])
-    col_date = pick_first_existing_column(df_trade, ["날짜", "거래일", "계약일", "일자", "거래일자"])
-    if not (col_area and col_complex and col_size and col_date):
+    if not (col_area and col_date and col_complex and col_size):
         return pd.DataFrame()
 
-    col_price = pick_first_existing_column(df_trade, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
     col_dong = pick_first_existing_column(df_trade, ["동"])
     col_ho = pick_first_existing_column(df_trade, ["호", "호수"])
-    col_land = pick_first_existing_column(df_trade, ["대지지분", "지분", "대지지분율"])
+    col_price = pick_first_existing_column(df_trade, ["금액", "가격", "거래가격", "거래가", "실거래가", "거래금액"])
+    col_land_trade = pick_first_existing_column(df_trade, ["대지지분", "지분", "대지지분율"])  # (거래내역에 있으면 우선 사용)
 
     t = df_trade.copy()
     t["_area_norm"] = t[col_area].astype(str).map(norm_area)
@@ -359,34 +374,33 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
     complex_norm = norm_text(complex_name)
     size_norm = norm_size(pyeong_value)
 
-    # 1) 구역/단지/평형(정규화)로 필터
     t = t[(t["_area_norm"] == area_norm) & (t["_complex_norm"] == complex_norm) & (t["_size_norm"] == size_norm)].copy()
     if t.empty:
         return pd.DataFrame()
 
-    # 2) 날짜 파싱 후 최신 5건
+    # 날짜 파싱 후 최신 5건
     t["_dt"] = pd.to_datetime(t[col_date], errors="coerce", format="%y.%m.%d")
     t.loc[t["_dt"].isna(), "_dt"] = pd.to_datetime(t.loc[t["_dt"].isna(), col_date], errors="coerce")
     t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(5).copy()
 
-    # 3) 가격(억) 숫자화
+    # 가격(억) 숫자화
     if col_price:
         t["_price_eok"] = t[col_price].map(to_eok_num)
     else:
         t["_price_eok"] = None
 
-    # 4) 평형(평) 숫자화 (평당가격 계산)
+    # 평형(평) 숫자화 (평당가격 계산)
     t["_pyeong_num"] = t[col_size].map(parse_pyeong_num)
 
-    # 5) 지분(대지지분) 확보: 거래내역에 있으면 우선 사용
-    if col_land:
-        t["_land_num"] = t[col_land].map(parse_numeric)
+    # 지분(대지지분) 확보: 거래내역에 있으면 우선, 없으면 NaN
+    if col_land_trade:
+        t["_land_num"] = t[col_land_trade].map(parse_numeric)
     else:
         t["_land_num"] = None
 
-    # 6) 거래내역에 지분이 없거나 NaN이면, 목록(df_listing)에서 (구역/단지/평형/동) 매칭으로 채움
-    #    - 동 매칭을 위해 숫자만 추출(dong_key)로 정규화
+    # 거래내역 지분이 비어있으면 목록(df_listing)에서 (구역/단지/평형/동) 매칭으로 채움
     if (t["_land_num"].isna().all()) and (df_listing is not None) and (not df_listing.empty):
+        # 목록 탭 필수: 구역/단지명/평형/동/대지지분
         if all(c in df_listing.columns for c in ["구역", "단지명", "평형", "동", "대지지분"]):
             ll = df_listing[["구역", "단지명", "평형", "동", "대지지분"]].copy()
             ll["_area_norm"] = ll["구역"].astype(str).map(norm_area)
@@ -395,28 +409,26 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
             ll["_dong_norm"] = ll["동"].map(dong_key)
             ll["_land_num"] = ll["대지지분"].map(parse_numeric)
 
+            # 거래내역 동 정규화(없으면 조인 불가 → 빈 값 유지)
             if col_dong:
                 t["_dong_norm"] = t[col_dong].map(dong_key)
             else:
                 t["_dong_norm"] = ""
 
-            # (구역/단지/평형/동)으로 조인
             t = t.merge(
                 ll[["_area_norm", "_complex_norm", "_size_norm", "_dong_norm", "_land_num"]],
                 on=["_area_norm", "_complex_norm", "_size_norm", "_dong_norm"],
                 how="left",
                 suffixes=("", "_from_list"),
             )
-
-            # 거래내역 지분이 비어있으면 목록값으로 대체
             if "_land_num_from_list" in t.columns:
                 t["_land_num"] = t["_land_num"].fillna(t["_land_num_from_list"])
                 t.drop(columns=["_land_num_from_list"], inplace=True)
 
-    # 7) 표시용 가격(억)
+    # 표시용 가격(억)
     t["가격"] = t["_price_eok"].map(lambda v: f"{fmt_decimal(v, 2)}억" if v is not None and not pd.isna(v) else "")
 
-    # 8) 평당가격(억) = 가격(억) / 평형(평)
+    # 평당가격(억) = 가격(억) / 평형(평)
     def _calc_pp(row):
         pr = row.get("_price_eok", None)
         py = row.get("_pyeong_num", None)
@@ -424,7 +436,7 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
             return ""
         return f"{fmt_decimal(float(pr) / float(py), 2)}억"
 
-    # 9) 지분당가격(억) = 가격(억) / 대지지분
+    # 지분당가격(억) = 가격(억) / 대지지분
     def _calc_lp(row):
         pr = row.get("_price_eok", None)
         land = row.get("_land_num", None)
@@ -435,7 +447,6 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
     t["평당가격"] = t.apply(_calc_pp, axis=1)
     t["지분당가격"] = t.apply(_calc_lp, axis=1)
 
-    # 10) 표준 컬럼 구성
     out = pd.DataFrame()
     out["날짜"] = t["_dt"].dt.strftime("%Y-%m-%d")
     out["구역"] = t[col_area].astype(str).map(lambda v: f"{norm_area(v)}구역" if norm_area(v) else str(v).strip())
@@ -446,9 +457,7 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
     out["호"] = t[col_ho].astype(str) if col_ho else ""
     out["평당가격"] = t["평당가격"]
     out["지분당가격"] = t["지분당가격"]
-
     return out
-
 
 
 def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
@@ -466,20 +475,6 @@ def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
             best_d = d
             best_meta = meta
     return best_meta
-
-
-def parse_numeric(x) -> float | None:
-    """'12.34', '12.34㎡', '약 12.3' 등에서 숫자만 추출"""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return None
-    s = str(x).strip()
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except Exception:
-        return None
 
 
 def st_html_table(df: pd.DataFrame, table_class: str = "center-table"):
@@ -677,8 +672,8 @@ if "map_center" not in st.session_state:
             raise ValueError("NaN center")
         st.session_state["map_center"] = [lat0, lng0]
     except Exception:
-        # 좌표가 없는 경우(또는 계산 실패)에는 압구정 기본 중심값
         st.session_state["map_center"] = [37.5275, 127.0300]
+
 if "map_zoom" not in st.session_state:
     st.session_state["map_zoom"] = DEFAULT_ZOOM
 if "selected_meta" not in st.session_state:
@@ -734,7 +729,6 @@ for _, r in gdf.iterrows():
         tooltip=tooltip,
     ).add_to(m)
 
-# 지도 영역 확장 (상하 배치로 변경)
 st.subheader("지도")
 out = st_folium(
     m,
@@ -754,7 +748,6 @@ if out:
             if st.session_state["last_click_sig"] != click_sig:
                 meta = resolve_clicked_meta(lat, lng, marker_rows)
                 if meta:
-                    # 마커 클릭 시: 지도 아래 출력만 바뀌게 selected_meta만 갱신
                     st.session_state["selected_meta"] = meta
                     st.session_state["last_click_sig"] = click_sig
 
@@ -769,7 +762,6 @@ if not meta:
 complex_name = meta["단지명"]
 dong = meta["동_key"]
 area_value = str(meta["구역"]) if pd.notna(meta["구역"]) else ""
-area_norm = norm_area(area_value)
 
 df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] == dong)].copy()
 
@@ -780,13 +772,11 @@ df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] =
 # - '대지지분당 가격' 열 추가 (가격/대지지분, 단위: 억)
 df_pick = df_pick.copy()
 
-# 평형: '56평' -> 56
 if "평형" in df_pick.columns:
     df_pick["_평형_num"] = df_pick["평형"].map(parse_pyeong_num)
 else:
     df_pick["_평형_num"] = None
 
-# 가격: 숫자 변환 (이미 억 단위 입력을 전제로 함)
 if "가격" in df_pick.columns:
     df_pick["_가격_num"] = pd.to_numeric(df_pick["가격"], errors="coerce")
 else:
@@ -803,7 +793,6 @@ def _calc_pyeong_price(row) -> str:
 
 df_pick["평당가"] = df_pick.apply(_calc_pyeong_price, axis=1)
 
-# 대지지분당 가격
 if "대지지분" in df_pick.columns:
     df_pick["_대지지분_num"] = df_pick["대지지분"].map(parse_numeric)
 else:
@@ -824,7 +813,6 @@ show_cols = ["단지명", "평형", "대지지분", "동", "층/호", "가격", 
 show_cols = [c for c in show_cols if c in df_pick.columns]
 view_pick = df_pick[show_cols].reset_index(drop=True)
 
-# HTML 표로 중앙정렬 출력
 st_html_table(view_pick)
 # ================================
 
@@ -844,7 +832,9 @@ else:
     sel_key = f"sel_pyeong_{norm_text(complex_name)}_{dong}"
     sel_pyeong = st.selectbox("평형 선택", pyeong_candidates, index=0, key=sel_key)
 
-    trades = recent_trades(df_trade, area_value, complex_name, sel_pyeong)
+    # 핵심 수정: df_view(목록)를 넘겨 지분당가격을 목록에서 매칭 계산
+    trades = recent_trades(df_trade, df_view, area_value, complex_name, sel_pyeong)
+
     if trades.empty:
         st.info("일치하는 거래내역이 없습니다.")
     else:
@@ -875,9 +865,6 @@ with col_left:
 with col_right:
     st.subheader("빠른 필터 (활성 매물)")
 
-    # -----------------------------
-    # (A) 평형대 필터: 상단
-    # -----------------------------
     c0, c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1, 1, 1, 1, 1.2])
 
     buckets = [20, 30, 40, 50, 60, 70, 80]
@@ -894,11 +881,6 @@ with col_right:
 
     mode = st.session_state["quick_filter_mode"]
 
-    # -----------------------------
-    # (B) 구역 필터: 하단(2단 버튼)
-    # - 본 시트의 '구역' 컬럼을 읽어 동적으로 구성
-    # - 기본값: 지도에서 클릭한 마커의 구역
-    # -----------------------------
     df_area = df_view[["구역"]].copy()
     df_area["_area_norm"] = df_area["구역"].astype(str).map(norm_area)
     df_area = df_area[df_area["_area_norm"].astype(str).str.strip() != ""].copy()
@@ -915,11 +897,9 @@ with col_right:
         else:
             area_labels[an] = str(an)
 
-    # 세션 초기화: 기본은 '전체' (지도 클릭과 무관)
     if "quick_filter_area_norm" not in st.session_state:
         st.session_state["quick_filter_area_norm"] = "__ALL__"
 
-    # 선택값이 실제 목록에 없으면 '전체'로 폴백
     sel_area_norm = st.session_state.get("quick_filter_area_norm", "__ALL__")
     if sel_area_norm != "__ALL__" and sel_area_norm not in area_labels:
         sel_area_norm = "__ALL__"
@@ -928,13 +908,11 @@ with col_right:
     st.markdown("**구역 선택**")
     aleft, aright = st.columns(2)
 
-    # '전체' 버튼 포함
     all_label = "[선택] 전체" if sel_area_norm == "__ALL__" else "전체"
     if aleft.button(all_label, use_container_width=True, key="qarea_all"):
         st.session_state["quick_filter_area_norm"] = "__ALL__"
         st.rerun()
 
-    # 구역 버튼(2단)
     for i, an in enumerate(area_norms):
         label = area_labels.get(an, str(an))
         btn_label = f"[선택] {label}" if an == sel_area_norm else label
@@ -943,10 +921,6 @@ with col_right:
             st.session_state["quick_filter_area_norm"] = an
             st.rerun()
 
-    # -----------------------------
-    # (C) 결과 표시
-    # - 선택 구역 내(또는 전체)에서 가격 오름차순
-    # -----------------------------
     if sel_area_norm == "__ALL__":
         area_display = "전체"
     else:
@@ -973,20 +947,15 @@ with col_right:
     if dfq.empty:
         st.info("조건에 맞는 매물이 없습니다.")
     else:
-        # 표시 컬럼 요구사항:
-        # 구역, 평형대, 평형, 단지명, 동, 층/호, 가격, 요약내용, 부동산
-        # - 시트에 따라 '가격'이 없고 '가격(억)표시'만 있을 수 있으므로 fallback 처리
         display_cols = ["구역", "평형대", "평형", "단지명", "동", "층/호", "가격", "요약내용", "부동산"]
         cols_exist = [c for c in display_cols if c in dfq.columns]
 
-        # fallback: '가격'이 없으면 '가격(억)표시'를 '가격'으로 대체
         rename_map2 = {}
         if "가격" not in cols_exist and "가격(억)표시" in dfq.columns:
             cols_exist = [c for c in cols_exist if c != "가격"]
             cols_exist.append("가격(억)표시")
             rename_map2["가격(억)표시"] = "가격"
 
-        # 데이터는 절대 head/limit 하지 않고, 조건에 맞는 전체를 그대로 보여줍니다.
         df_show = dfq[cols_exist + ["위도", "경도", "동_key", "가격_num"]].copy().reset_index(drop=True)
         df_table = df_show[cols_exist].copy()
         if rename_map2:
@@ -995,7 +964,6 @@ with col_right:
         st.caption(f"해당 조건 매물: {len(df_table):,}건 (표는 스크롤로 전체 확인 가능합니다)")
         st.markdown("표에서 행을 클릭하면 해당 동 위치로 지도가 이동합니다.")
 
-        # 여기 표는 행 클릭 인터랙션이 필요하므로 st.dataframe 유지
         event = st_df(
             df_table,
             height=dataframe_height(df_table, max_height=900),
@@ -1012,7 +980,6 @@ with col_right:
                 if st.session_state["last_table_sel_sig"] != sel_sig:
                     st.session_state["last_table_sel_sig"] = sel_sig
 
-                    # 좌표가 있는 경우에만 지도 이동/마커 선택 동기화
                     latv = pd.to_numeric(row.get("위도"), errors="coerce")
                     lngv = pd.to_numeric(row.get("경도"), errors="coerce")
                     if pd.isna(latv) or pd.isna(lngv):
