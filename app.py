@@ -349,12 +349,13 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
     - 지분당가격 계산 로직:
         1) 거래내역 탭에 대지지분(지분) 컬럼이 있으면 우선 사용
         2) 없거나 비어있으면 목록(df_listing)에서 (구역/단지/평형/동) 정확 매칭으로 대지지분 사용
+           (중요) 목록은 키당 1행으로 축약 후 merge(validate="many_to_one") -> 행이 절대 불어나지 않음
         3) 그래도 못 찾으면 목록(df_listing)에서 (구역/단지/평형) 대표값(최빈값)으로 fallback
+           (역시 키당 1행으로 축약 후 merge(validate="many_to_one"))
     """
     if df_trade is None or df_trade.empty:
         return pd.DataFrame()
 
-    # 거래내역 탭(스크린샷 기준: 구역/날짜/단지/평형/동/호/금액 ...)
     col_area = pick_first_existing_column(df_trade, ["구역"])
     col_date = pick_first_existing_column(df_trade, ["날짜", "거래일", "계약일", "일자", "거래일자"])
     col_complex = pick_first_existing_column(df_trade, ["단지", "단지명", "단지명(단지)"])
@@ -365,7 +366,7 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
     col_dong = pick_first_existing_column(df_trade, ["동"])
     col_ho = pick_first_existing_column(df_trade, ["호", "호수"])
     col_price = pick_first_existing_column(df_trade, ["금액", "가격", "거래가격", "거래가", "실거래가", "거래금액"])
-    col_land_trade = pick_first_existing_column(df_trade, ["대지지분", "지분", "대지지분율"])  # (거래내역에 있으면 우선)
+    col_land_trade = pick_first_existing_column(df_trade, ["대지지분", "지분", "대지지분율"])
 
     t = df_trade.copy()
     t["_area_norm"] = t[col_area].astype(str).map(norm_area)
@@ -376,15 +377,16 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
     complex_norm = norm_text(complex_name)
     size_norm = norm_size(pyeong_value)
 
-    # 구역/단지/평형 일치 필터
     t = t[(t["_area_norm"] == area_norm) & (t["_complex_norm"] == complex_norm) & (t["_size_norm"] == size_norm)].copy()
     if t.empty:
         return pd.DataFrame()
 
-    # 날짜 파싱 후 최신 5건
+    # 날짜 파싱
     t["_dt"] = pd.to_datetime(t[col_date], errors="coerce", format="%y.%m.%d")
     t.loc[t["_dt"].isna(), "_dt"] = pd.to_datetime(t.loc[t["_dt"].isna(), col_date], errors="coerce")
-    t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(5).copy()
+    t = t.dropna(subset=["_dt"]).copy()
+    if t.empty:
+        return pd.DataFrame()
 
     # 가격(억) 숫자화
     if col_price:
@@ -392,8 +394,14 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
     else:
         t["_price_eok"] = None
 
-    # 평형(평) 숫자화 (평당가격 계산)
+    # 평형(평) 숫자화
     t["_pyeong_num"] = t[col_size].map(parse_pyeong_num)
+
+    # 동 정규화(목록 매칭용)
+    t["_dong_norm"] = t[col_dong].map(dong_key) if col_dong else ""
+
+    # 최신 5건 먼저 고정(여기서 5건을 확정해두고, 이후 merge는 절대 행이 불어나지 않게 many_to_one 강제)
+    t = t.sort_values("_dt", ascending=False).head(5).copy()
 
     # 지분(대지지분) 확보: 거래내역에 있으면 우선
     if col_land_trade:
@@ -401,9 +409,14 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
     else:
         t["_land_num"] = None
 
-    # ---- 1차: 목록(df_listing)에서 (구역/단지/평형/동) 정확 매칭 ----
-    if (t["_land_num"].isna().all()) and (df_listing is not None) and (not df_listing.empty):
-        if all(c in df_listing.columns for c in ["구역", "단지명", "평형", "동", "대지지분"]):
+    # ---- 목록 매칭 준비 ----
+    if df_listing is not None and (not df_listing.empty):
+        # 공통 정규화 컬럼 준비(필요 컬럼이 없으면 스킵)
+        has_exact_cols = all(c in df_listing.columns for c in ["구역", "단지명", "평형", "동", "대지지분"])
+        has_fallback_cols = all(c in df_listing.columns for c in ["구역", "단지명", "평형", "대지지분"])
+
+        # 1) (구역/단지/평형/동) 정확 매칭: 키당 1행으로 축약 후 merge (행이 절대 늘어나지 않음)
+        if (t["_land_num"].isna().all()) and has_exact_cols:
             ll = df_listing[["구역", "단지명", "평형", "동", "대지지분"]].copy()
             ll["_area_norm"] = ll["구역"].astype(str).map(norm_area)
             ll["_complex_norm"] = ll["단지명"].astype(str).map(norm_text)
@@ -411,29 +424,36 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
             ll["_dong_norm"] = ll["동"].map(dong_key)
             ll["_land_num"] = ll["대지지분"].map(parse_numeric)
 
-            if col_dong:
-                t["_dong_norm"] = t[col_dong].map(dong_key)
-            else:
-                t["_dong_norm"] = ""
+            keys_exact = ["_area_norm", "_complex_norm", "_size_norm", "_dong_norm"]
 
-            t = t.merge(
-                ll[["_area_norm", "_complex_norm", "_size_norm", "_dong_norm", "_land_num"]],
-                on=["_area_norm", "_complex_norm", "_size_norm", "_dong_norm"],
-                how="left",
-                suffixes=("", "_from_list"),
+            def _mode_or_first(s: pd.Series):
+                s = s.dropna()
+                if s.empty:
+                    return None
+                m = s.mode()
+                return float(m.iloc[0]) if not m.empty else float(s.iloc[0])
+
+            ll_ref = (
+                ll.groupby(keys_exact, dropna=False)["_land_num"]
+                  .apply(_mode_or_first)
+                  .reset_index()
+                  .rename(columns={"_land_num": "_land_num_from_list"})
             )
-            if "_land_num_from_list" in t.columns:
-                t["_land_num"] = t["_land_num"].fillna(t["_land_num_from_list"])
-                t.drop(columns=["_land_num_from_list"], inplace=True)
 
-    # ---- 2차: 여전히 비어있으면 (구역/단지/평형) 대표값(최빈값) fallback ----
-    if (t["_land_num"].isna().any()) and (df_listing is not None) and (not df_listing.empty):
-        if all(c in df_listing.columns for c in ["구역", "단지명", "평형", "대지지분"]):
+            # many_to_one 강제: 만약 ll_ref가 키당 1행이 아니면 즉시 에러로 드러남(조용한 행증식 방지)
+            t = t.merge(ll_ref, on=keys_exact, how="left", validate="many_to_one")
+            t["_land_num"] = t["_land_num"].fillna(t["_land_num_from_list"])
+            t.drop(columns=["_land_num_from_list"], inplace=True, errors="ignore")
+
+        # 2) fallback: (구역/단지/평형) 대표값(최빈값)으로 채움 (키당 1행으로 축약 후 merge)
+        if (t["_land_num"].isna().any()) and has_fallback_cols:
             base = df_listing[["구역", "단지명", "평형", "대지지분"]].copy()
             base["_area_norm"] = base["구역"].astype(str).map(norm_area)
             base["_complex_norm"] = base["단지명"].astype(str).map(norm_text)
             base["_size_norm"] = base["평형"].astype(str).map(norm_size)
             base["_land_num_base"] = base["대지지분"].map(parse_numeric)
+
+            keys_fb = ["_area_norm", "_complex_norm", "_size_norm"]
 
             def _mode_or_nan(s: pd.Series):
                 s = s.dropna()
@@ -443,13 +463,13 @@ def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, c
                 return float(m.iloc[0]) if not m.empty else float(s.iloc[0])
 
             ref = (
-                base.groupby(["_area_norm", "_complex_norm", "_size_norm"], dropna=False)["_land_num_base"]
-                .apply(_mode_or_nan)
-                .reset_index()
-                .rename(columns={"_land_num_base": "_land_fallback"})
+                base.groupby(keys_fb, dropna=False)["_land_num_base"]
+                    .apply(_mode_or_nan)
+                    .reset_index()
+                    .rename(columns={"_land_num_base": "_land_fallback"})
             )
 
-            t = t.merge(ref, on=["_area_norm", "_complex_norm", "_size_norm"], how="left")
+            t = t.merge(ref, on=keys_fb, how="left", validate="many_to_one")
             t["_land_num"] = t["_land_num"].fillna(t["_land_fallback"])
             t.drop(columns=["_land_fallback"], inplace=True, errors="ignore")
 
@@ -792,10 +812,6 @@ area_value = str(meta["구역"]) if pd.notna(meta["구역"]) else ""
 df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] == dong)].copy()
 
 # ===== 요청 반영 =====
-# - '평형대','구역' 제거
-# - '부동산'을 '요약내용' 앞에 배치
-# - '상태' 숨김
-# - '평당가'(가격/평형, 억), '대지지분당 가격'(가격/대지지분, 억) 추가
 df_pick = df_pick.copy()
 
 df_pick["_평형_num"] = df_pick["평형"].map(parse_pyeong_num) if "평형" in df_pick.columns else None
@@ -844,7 +860,7 @@ else:
     sel_key = f"sel_pyeong_{norm_text(complex_name)}_{dong}"
     sel_pyeong = st.selectbox("평형 선택", pyeong_candidates, index=0, key=sel_key)
 
-    # 핵심: df_list(전체 목록)를 넘겨서 지분 매칭 성공률을 최대화
+    # df_list(전체 목록)를 넘겨서 지분 매칭 성공률을 최대화
     trades = recent_trades(df_trade, df_list, area_value, complex_name, sel_pyeong)
 
     if trades.empty:
