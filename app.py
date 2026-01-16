@@ -328,11 +328,12 @@ def summarize_area_by_size(df_active: pd.DataFrame, area_value: str) -> pd.DataF
     return s
 
 
-def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_value: str) -> pd.DataFrame:
+def recent_trades(df_trade: pd.DataFrame, df_listing: pd.DataFrame, area: str, complex_name: str, pyeong_value: str) -> pd.DataFrame:
     """
     거래내역 최신 5건:
     - 날짜, 구역, 단지, 평형, 가격, 동, 호, 평당가격, 지분당가격
-    - 가격은 억 단위로 표시/계산 (원 단위면 자동 환산)
+    - 지분당가격은 우선 거래내역 탭의 지분 컬럼을 사용하고,
+      없으면 '매매물건 목록(df_listing)'에서 (구역/단지/평형/동) 매칭으로 대지지분을 가져와 계산
     """
     if df_trade is None or df_trade.empty:
         return pd.DataFrame()
@@ -358,32 +359,64 @@ def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_v
     complex_norm = norm_text(complex_name)
     size_norm = norm_size(pyeong_value)
 
+    # 1) 구역/단지/평형(정규화)로 필터
     t = t[(t["_area_norm"] == area_norm) & (t["_complex_norm"] == complex_norm) & (t["_size_norm"] == size_norm)].copy()
     if t.empty:
         return pd.DataFrame()
 
-    # 날짜 파싱 후 최신 5건 (기존 포맷 우선, 실패분은 일반 파싱)
+    # 2) 날짜 파싱 후 최신 5건
     t["_dt"] = pd.to_datetime(t[col_date], errors="coerce", format="%y.%m.%d")
     t.loc[t["_dt"].isna(), "_dt"] = pd.to_datetime(t.loc[t["_dt"].isna(), col_date], errors="coerce")
     t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(5).copy()
 
-    # 계산용 숫자
+    # 3) 가격(억) 숫자화
     if col_price:
         t["_price_eok"] = t[col_price].map(to_eok_num)
     else:
         t["_price_eok"] = None
 
+    # 4) 평형(평) 숫자화 (평당가격 계산)
     t["_pyeong_num"] = t[col_size].map(parse_pyeong_num)
 
+    # 5) 지분(대지지분) 확보: 거래내역에 있으면 우선 사용
     if col_land:
         t["_land_num"] = t[col_land].map(parse_numeric)
     else:
         t["_land_num"] = None
 
-    # 표시용 가격(억)
+    # 6) 거래내역에 지분이 없거나 NaN이면, 목록(df_listing)에서 (구역/단지/평형/동) 매칭으로 채움
+    #    - 동 매칭을 위해 숫자만 추출(dong_key)로 정규화
+    if (t["_land_num"].isna().all()) and (df_listing is not None) and (not df_listing.empty):
+        if all(c in df_listing.columns for c in ["구역", "단지명", "평형", "동", "대지지분"]):
+            ll = df_listing[["구역", "단지명", "평형", "동", "대지지분"]].copy()
+            ll["_area_norm"] = ll["구역"].astype(str).map(norm_area)
+            ll["_complex_norm"] = ll["단지명"].astype(str).map(norm_text)
+            ll["_size_norm"] = ll["평형"].astype(str).map(norm_size)
+            ll["_dong_norm"] = ll["동"].map(dong_key)
+            ll["_land_num"] = ll["대지지분"].map(parse_numeric)
+
+            if col_dong:
+                t["_dong_norm"] = t[col_dong].map(dong_key)
+            else:
+                t["_dong_norm"] = ""
+
+            # (구역/단지/평형/동)으로 조인
+            t = t.merge(
+                ll[["_area_norm", "_complex_norm", "_size_norm", "_dong_norm", "_land_num"]],
+                on=["_area_norm", "_complex_norm", "_size_norm", "_dong_norm"],
+                how="left",
+                suffixes=("", "_from_list"),
+            )
+
+            # 거래내역 지분이 비어있으면 목록값으로 대체
+            if "_land_num_from_list" in t.columns:
+                t["_land_num"] = t["_land_num"].fillna(t["_land_num_from_list"])
+                t.drop(columns=["_land_num_from_list"], inplace=True)
+
+    # 7) 표시용 가격(억)
     t["가격"] = t["_price_eok"].map(lambda v: f"{fmt_decimal(v, 2)}억" if v is not None and not pd.isna(v) else "")
 
-    # 평당가격(억) = 가격(억) / 평형(평)
+    # 8) 평당가격(억) = 가격(억) / 평형(평)
     def _calc_pp(row):
         pr = row.get("_price_eok", None)
         py = row.get("_pyeong_num", None)
@@ -391,7 +424,7 @@ def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_v
             return ""
         return f"{fmt_decimal(float(pr) / float(py), 2)}억"
 
-    # 지분당가격(억) = 가격(억) / 대지지분(숫자)
+    # 9) 지분당가격(억) = 가격(억) / 대지지분
     def _calc_lp(row):
         pr = row.get("_price_eok", None)
         land = row.get("_land_num", None)
@@ -402,7 +435,7 @@ def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_v
     t["평당가격"] = t.apply(_calc_pp, axis=1)
     t["지분당가격"] = t.apply(_calc_lp, axis=1)
 
-    # 표준 컬럼명으로 정리
+    # 10) 표준 컬럼 구성
     out = pd.DataFrame()
     out["날짜"] = t["_dt"].dt.strftime("%Y-%m-%d")
     out["구역"] = t[col_area].astype(str).map(lambda v: f"{norm_area(v)}구역" if norm_area(v) else str(v).strip())
@@ -415,6 +448,7 @@ def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_v
     out["지분당가격"] = t["지분당가격"]
 
     return out
+
 
 
 def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
